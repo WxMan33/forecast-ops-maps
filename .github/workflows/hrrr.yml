@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["pipeline/**", "site/**", ".github/workflows/hrrr.yml"]
+    paths: ["pipeline/**", "site/**", "archive/**", ".github/workflows/hrrr.yml"]
 permissions:
   contents: read
 concurrency: { group: hrrr-pages, cancel-in-progress: false }
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      changed: ${{ steps.build.outputs.changed }}
+      changed: ${{ steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,7 +30,19 @@ jobs:
         run: |
           mkdir -p _site && cp -r site/. _site/
           python pipeline/hrrr.py --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT"
-      - if: steps.build.outputs.changed == 'true' || github.event_name != 'schedule'
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Trend archive self-test
+        run: node archive/test/test_trends.js
+        continue-on-error: true   # a failure shows in the log; the map deployment and the carry-only fallback are unaffected
+      - name: CVG model-trend archive (confirmed 00Z/12Z runs + labelled snapshots)
+        id: trends
+        # A failed update republishes the previous archive unchanged; it never blocks the map deployment.
+        run: |
+          node archive/trends.js --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT" \
+            || node archive/trends.js --carry-only --site _site --published "https://wxman33.github.io/forecast-ops-maps" \
+            || echo "::warning::trend archive unavailable this run"
+      - if: steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || github.event_name != 'schedule'
         uses: actions/upload-pages-artifact@v3
         with: { path: _site }
   deploy:

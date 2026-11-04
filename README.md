@@ -22,3 +22,11 @@ python -m pip install -r pipeline/requirements.txt
 python pipeline/test_hrrr.py
 python pipeline/hrrr.py --site _site
 ```
+
+## CVG model-trend archive (`data/trends/CVG/`)
+
+`archive/trends.js` keeps the five most recent 00Z/12Z cycles of point guidance at CVG, so the newest run can be compared with the previous run, 24 h earlier and 48 h earlier. It uses the forecast site's own loaders and snapshot code (vendored in `archive/vendor/`).
+
+- **Deterministic models** (GFS, ECMWF IFS/AIFS, NBM, HRRR, RRFS 3 km, ICON, GEM, UKMO, Météo-France, JMA): retrieved from the Open-Meteo Single Runs API with `run=<cycle>`, accepted only when the response's time axis starts at that cycle and Open-Meteo's metadata shows the run complete (sources without metadata wait 10 h). These are **confirmed runs**; earlier cycles are backfilled.
+- **Ensembles and NWS:** no run-specific retrieval exists (checked with `probe/run-identity.js`: Single Runs API 404, ensemble API rejects past `run=`). They are archived as **timestamped snapshots** with the provider-reported latest run or NWS update time, and are never labelled 00Z/12Z.
+- Files are immutable and carried forward from the live site with SHA-256 checks. If an update fails, the previous archive is republished unchanged and the map deployment continues.

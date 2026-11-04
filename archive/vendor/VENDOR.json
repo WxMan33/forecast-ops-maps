@@ -1,0 +1,5 @@
+{
+ "source": "WxMan33/forecast-ops assets/ (ops-core.js, ops-data.js, model-trends.js, trend-archive-core.js)",
+ "note": "Copied so archived rows are computed with exactly the browser code. Re-copy when those files change; tests in forecast-ops compare against them.",
+ "copiedAt": "2026-11-04T20:44:50.330Z"
+}
