@@ -38,6 +38,9 @@ ok(hrrr.classify({**base, "shortName": "tp", "stepType": "accum", "startStep": 4
 ok(hrrr.classify({"shortName": "2t", "typeOfLevel": "heightAboveGround", "level": 2, "stepType": "instant", "units": "K"}, 3) == "t2m", "2-m temperature")
 ok(hrrr.classify({"shortName": "2t", "typeOfLevel": "heightAboveGround", "level": 2, "stepType": "max", "units": "K"}, 3) is None, "a max temperature is not the instantaneous field")
 ok(hrrr.classify({"shortName": "refc", "stepType": "instant"}, 3) == "refc", "composite reflectivity")
+ok(hrrr.classify({"shortName": "refd", "typeOfLevel": "heightAboveGround", "level": 1000, "stepType": "instant"}, 3) == "refd1km", "1 km AGL reflectivity")
+ok(hrrr.classify({"shortName": "refd", "typeOfLevel": "heightAboveGround", "level": 4000, "stepType": "instant"}, 3) is None, "4 km reflectivity is not mistaken for 1 km")
+ok(hrrr.classify({"shortName": "refd", "typeOfLevel": "isothermal", "level": 263, "stepType": "max"}, 3) is None, "-10 C hourly max reflectivity is not mistaken for 1 km")
 
 # encoding: missing stays missing; units converted
 e = hrrr.encode("t2m", np.array([[273.15, np.nan]]))

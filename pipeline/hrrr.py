@@ -39,7 +39,9 @@ MISSU16 = 65535
 FIELDS = {
     "t2m":       {"label": "2-m temperature", "units": "degF", "scale": 0.1, "dtype": "int16", "kind": "instant"},
     "refc":      {"label": "Simulated composite reflectivity", "units": "dBZ", "scale": 0.1, "dtype": "int16", "kind": "instant",
-                  "note": "model-simulated, not radar"},
+                  "note": "model-simulated column maximum, not radar"},
+    "refd1km":   {"label": "Simulated reflectivity, 1 km above ground", "units": "dBZ", "scale": 0.1, "dtype": "int16", "kind": "instant",
+                  "note": "model-simulated at 1000 m AGL, not radar; differs from composite (column maximum)"},
     "apcp_hour": {"label": "Precipitation, previous hour", "units": "mm", "scale": 0.01, "dtype": "uint16", "kind": "accum"},
     "apcp_run":  {"label": "Precipitation since run start", "units": "mm", "scale": 0.01, "dtype": "uint16", "kind": "accum"},
 }
@@ -116,6 +118,7 @@ def idx_rows(url):
 def candidates(rows):
     """Index entries that may hold our fields; each is confirmed from GRIB metadata after download."""
     return [r for r in rows if (r["var"] == "TMP" and r["level"] == "2 m above ground") or r["var"] == "REFC"
+            or (r["var"] == "REFD" and r["level"] == "1000 m above ground")
             or (r["var"] == "APCP" and r["level"] == "surface")]
 
 
@@ -139,6 +142,8 @@ def classify(k, fh):
         return "t2m"
     if k["shortName"] == "refc" and k["stepType"] == "instant":
         return "refc"
+    if k["shortName"] == "refd" and k["typeOfLevel"] == "heightAboveGround" and k["level"] == 1000 and k["stepType"] == "instant":
+        return "refd1km"
     if k["shortName"] == "tp" and k["stepType"] == "accum" and k["typeOfLevel"] == "surface" and k["units"] == "kg m**-2" and k["stepUnits"] == 1 and k["endStep"] == fh:
         if k["startStep"] == 0 and k["endStep"] == fh:
             return "apcp_run" if fh != 1 else "apcp_run+hour"   # 0-1 h is both the run total and the last hour
@@ -321,9 +326,12 @@ def main():
     ap.add_argument("--now", default=None, help="UTC time override, ISO")
     ap.add_argument("--only", default=None, help="process just this cycle YYYYMMDDHH with --hours")
     ap.add_argument("--hours", type=int, default=None)
+    ap.add_argument("--box", default=None, help="lat0,lat1,lon0,lon1 override (benchmarks only)")
     ap.add_argument("--changed-output", default=None, help="file to append changed=true|false (GitHub Actions output)")
     a = ap.parse_args()
     now = dt.datetime.fromisoformat(a.now).replace(tzinfo=UTC) if a.now else dt.datetime.now(UTC)
+    if a.box:
+        la0, la1, lo0, lo1 = map(float, a.box.split(",")); BOX["lat"] = [la0, la1]; BOX["lon"] = [lo0, lo1]
     data_dir = os.path.join(a.site, "data", "hrrr"); os.makedirs(data_dir, exist_ok=True)
     if a.only:
         c = dt.datetime.strptime(a.only, "%Y%m%d%H").replace(tzinfo=UTC)
