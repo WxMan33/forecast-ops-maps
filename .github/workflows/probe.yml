@@ -11,3 +11,4 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - run: node probe/run-identity.js
+      - run: node probe/archive-request.js

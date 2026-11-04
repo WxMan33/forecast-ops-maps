@@ -106,6 +106,7 @@ async function main() {
   }
   index.snapshots = index.snapshots.slice(0, KEEP);
   const okRuns = index.cycles.reduce((n, c) => n + Object.values(c.sources).filter((s) => s.identity === "confirmed-run").length, 0);
+  if (!okRuns) { const why = {}; index.cycles.forEach((c) => Object.entries(c.sources).forEach(([id, s]) => { if (s.why) (why[s.why] = why[s.why] || []).push(`${c.id}:${id}`); })); console.log("no confirmed runs; reasons:", JSON.stringify(Object.fromEntries(Object.entries(why).map(([k, v]) => [k, v.length + " e.g. " + v.slice(0, 3).join(",")])))); }
   if (!okRuns && !(prev.cycles || []).length) throw new Error("no confirmed runs archived and nothing published before");
   write("index.json", index);
   const changed = added > 0 || JSON.stringify((prev.cycles || []).map((c) => c.id)) !== JSON.stringify(index.cycles.map((c) => c.id));
