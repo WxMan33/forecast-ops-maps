@@ -41,7 +41,9 @@ function sourceSnapshot(data, id, at) {
 
 async function confirmedRun(id, cycleMs) {
   const run = new Date(cycleMs).toISOString().slice(0, 16);
-  const spec = { ...C.config.blend, base: SINGLE, params: { ...C.config.blend.params, run } };
+  /* hourly fields only: the Single Runs API rejects the daily block, so archived daily highs/lows come
+     from hourly values for EVERY archived run (run-to-run comparisons stay like for like) */
+  const spec = { ...C.config.blend, daily: [], base: SINGLE, params: { ...C.config.blend.params, run } };
   const res = await D.loadModels(spec, { lat: LOC.lat, lon: LOC.lon, days: DAYS, ids: [id] });
   const md = res.models && res.models[id];
   if (!md) return { error: (res.problems || []).join("; ") || "no data" };

@@ -4,7 +4,7 @@ const C = require("../archive/vendor/ops-core.js"), D = require("../archive/vend
 (async () => {
   const cyc = Math.floor((Date.now() - 12 * 3600e3) / (12 * 3600e3)) * 12 * 3600e3, run = new Date(cyc).toISOString().slice(0, 16);
   for (const id of ["gfs_seamless", "ecmwf_ifs025", "ncep_nbm_conus"]) {
-    const spec = { ...C.config.blend, base: "https://single-runs-api.open-meteo.com/v1/forecast", params: { ...C.config.blend.params, run } };
+    const spec = { ...C.config.blend, daily: [], base: "https://single-runs-api.open-meteo.com/v1/forecast", params: { ...C.config.blend.params, run } };
     const p = new URLSearchParams({ ...spec.params, forecast_days: 8, latitude: 39.04456, longitude: -84.67229, timezone: "auto", models: id, hourly: spec.hourly.join(",") });
     const r = await fetch(`${spec.base}?${p}`); const j = await r.json().catch(() => null);
     console.log(id, run, "HTTP", r.status, j && j.error ? "ERROR " + j.reason : `first=${j && j.hourly && j.hourly.time[0]} offset=${j && j.utc_offset_seconds} n=${j && j.hourly && j.hourly.time.length}`);
