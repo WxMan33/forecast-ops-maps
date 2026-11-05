@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HRRR Tri-State map packages for Forecast Ops (hrrr-maps-v1).
+"""HRRR Tri-State map packages for Forecast Ops (surface-v2).
 
 Reads NOAA HRRR CONUS 2-D surface files (wrfsfcfNN.grib2) from the NOAA Open Data Dissemination
 bucket on AWS, fetching only the needed GRIB messages by byte range (from each file's .idx). Every
@@ -19,11 +19,12 @@ file per field holding all forecast hours), and data/index.json listing the reta
 caller assembles the whole site and deploys it in one step, so a failed run never replaces a
 working one. Missing hours/fields stay missing (sentinel), never zero.
 """
-import argparse, concurrent.futures as cf, datetime as dt, gzip, hashlib, json, math, os, re, sys, time
+import argparse, concurrent.futures as cf, datetime as dt, gzip, hashlib, json, math, os, re, shutil, sys, time
 import urllib.request, urllib.error
 import numpy as np
 
-VERSION = "hrrr-maps-v1"
+VERSION = "hrrr-maps-v2"
+PACKAGE = "surface-v2"
 BUCKET = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 UA = {"User-Agent": "forecast-ops-maps HRRR Tri-State packager (github.com/WxMan33/forecast-ops-maps)"}
 BOX = {"lat": [37.6, 40.7], "lon": [-86.6, -82.4]}   # Cincinnati Tri-State and surroundings
@@ -38,6 +39,13 @@ MISS16 = -32768
 MISSU16 = 65535
 FIELDS = {
     "t2m":       {"label": "2-m temperature", "units": "degF", "scale": 0.1, "dtype": "int16", "kind": "instant"},
+    "d2m":       {"label": "2-m dew point", "units": "degF", "scale": 0.1, "dtype": "int16", "kind": "instant", "heightMetres": 2},
+    "w10m":      {"label": "10-m wind speed", "units": "mph", "scale": 0.1, "dtype": "uint16", "kind": "instant", "heightMetres": 10,
+                  "note": "derived as hypot(10u,10v) from compatible instantaneous grid-relative components; magnitude is rotation-invariant; no wind direction inferred"},
+    "gust":      {"label": "Surface wind gust", "units": "mph", "scale": 0.1, "dtype": "uint16", "kind": "instant",
+                  "note": "instantaneous HRRR surface gust diagnostic at valid time, not the previous-hour maximum wind field"},
+    "cloud":     {"label": "Total cloud cover", "units": "%", "scale": 0.1, "dtype": "uint16", "kind": "instant",
+                  "note": "entire-atmosphere total cloud cover, not low cloud or ceiling"},
     "refc":      {"label": "Simulated composite reflectivity", "units": "dBZ", "scale": 0.1, "dtype": "int16", "kind": "instant",
                   "note": "model-simulated column maximum, not radar"},
     "refd1km":   {"label": "Simulated reflectivity, 1 km above ground", "units": "dBZ", "scale": 0.1, "dtype": "int16", "kind": "instant",
@@ -119,7 +127,11 @@ def candidates(rows):
     """Index entries that may hold our fields; each is confirmed from GRIB metadata after download."""
     return [r for r in rows if (r["var"] == "TMP" and r["level"] == "2 m above ground") or r["var"] == "REFC"
             or (r["var"] == "REFD" and r["level"] == "1000 m above ground")
-            or (r["var"] == "APCP" and r["level"] == "surface")]
+            or (r["var"] == "APCP" and r["level"] == "surface")
+            or (r["var"] == "DPT" and r["level"] == "2 m above ground")
+            or (r["var"] in ("UGRD", "VGRD") and r["level"] == "10 m above ground")
+            or (r["var"] == "GUST" and r["level"] == "surface")
+            or (r["var"] == "TCDC" and r["level"] == "entire atmosphere")]
 
 
 def decode(buf):
@@ -130,7 +142,10 @@ def decode(buf):
                                           "dataDate", "dataTime", "gridType", "Nx", "Ny", "LaDInDegrees", "LoVInDegrees", "Latin1InDegrees",
                                           "Latin2InDegrees", "latitudeOfFirstGridPointInDegrees", "longitudeOfFirstGridPointInDegrees",
                                           "DxInMetres", "DyInMetres", "iScansNegatively", "jScansPositively", "jPointsAreConsecutive", "radius")}
+        k["uvRelativeToGrid"] = codes_get(g, "uvRelativeToGrid")
         v = codes_get_values(g).reshape(k["Ny"], k["Nx"])
+        if codes_get(g, "numberOfMissing"):
+            v[v == codes_get(g, "missingValue")] = np.nan
         return k, v
     finally:
         codes_release(g)
@@ -138,6 +153,15 @@ def decode(buf):
 
 def classify(k, fh):
     """Map a decoded message to one of our fields, from GRIB metadata only; None if it is not one."""
+    instant = k.get("stepType") == "instant" and k.get("stepUnits") == 1 and k.get("startStep") == fh and k.get("endStep") == fh
+    if instant and k["shortName"] == "2d" and k["typeOfLevel"] == "heightAboveGround" and k["level"] == 2 and k["units"] == "K":
+        return "d2m"
+    if instant and k["shortName"] in ("10u", "10v") and k["typeOfLevel"] == "heightAboveGround" and k["level"] == 10 and k["units"] == "m s**-1":
+        return "u10" if k["shortName"] == "10u" else "v10"
+    if instant and k["shortName"] == "gust" and k["typeOfLevel"] == "surface" and k["level"] == 0 and k["units"] == "m s**-1":
+        return "gust"
+    if instant and k["shortName"] == "tcc" and k["typeOfLevel"] == "atmosphere" and k["units"] == "%":
+        return "cloud"
     if k["shortName"] == "2t" and k["typeOfLevel"] == "heightAboveGround" and k["level"] == 2 and k["stepType"] == "instant" and k["units"] == "K":
         return "t2m"
     if k["shortName"] == "refc" and k["stepType"] == "instant":
@@ -224,7 +248,9 @@ def checkpoints(buf, win):
 def encode(field, arr):
     f = FIELDS[field]
     a = np.asarray(arr, dtype=np.float64)
-    if field == "t2m": a = (a - 273.15) * 9 / 5 + 32
+    if field in ("t2m", "d2m"): a = (a - 273.15) * 9 / 5 + 32
+    if field in ("w10m", "gust"): a = np.where(a >= 0, a * 2.2369362920544, np.nan)
+    if field == "cloud": a = np.where((a >= 0) & (a <= 100), a, np.nan)
     q = np.round(a / f["scale"])
     if f["dtype"] == "int16":
         out = np.where(np.isfinite(q), np.clip(q, -32767, 32767), MISS16).astype("<i2")
@@ -233,12 +259,22 @@ def encode(field, arr):
     return out
 
 
+def wind_magnitude(u, v, um, vm):
+    """Speed only: rotation-invariant norm of compatible same-run native-grid components."""
+    if u is None or v is None or um is None or vm is None: return None
+    if any(um.get(k) != vm.get(k) for k in ("startStep", "endStep", "uvRelativeToGrid")): return None
+    if np.shape(u) != np.shape(v): return None
+    return np.hypot(u, v)
+
+
 def process_run(cycle, nhours, out_dir, workers=6, log=print):
     base = f"{BUCKET}/hrrr.{cycle:%Y%m%d}/conus/hrrr.t{cycle:%H}z.wrfsfcf%02d.grib2"
     hours = list(range(0, nhours + 1))
     proj = win = geo = None; checks = None
-    data = {f: [None] * len(hours) for f in FIELDS}
-    meta = {f: [None] * len(hours) for f in FIELDS}
+    inputs = list(FIELDS) + ["u10", "v10"]
+    data = {f: [None] * len(hours) for f in inputs}
+    meta = {f: [None] * len(hours) for f in inputs}
+    field_checks = {}
     sources, grib_bytes = [], 0
 
     def fetch_hour(fh):
@@ -268,15 +304,27 @@ def process_run(cycle, nhours, out_dir, workers=6, log=print):
             if run != cycle: raise RuntimeError(f"f{fh:02d} message is from run {run:%Y%m%d%H}, not {cycle:%Y%m%d%H}")
             c = classify(k, fh)
             if c == "t2m" and checks is None: checks = {"fh": fh, "field": "t2m", "points": checkpoints(buf, win)}
+            if c in ("d2m", "u10", "v10", "gust", "cloud") and c not in field_checks:
+                field_checks[c] = {"fh": fh, "points": checkpoints(buf, win)}
             sha = hashlib.sha256(buf).hexdigest()
             sources.append({"fh": fh, "url": url, "range": [r["start"], r["end"]], "bytes": len(buf), "sha256": sha, "idx": f'{r["var"]}:{r["level"]}:{r["step"]}', "field": c,
-                            "grib": {"shortName": k["shortName"], "stepType": k["stepType"], "startStep": k["startStep"], "endStep": k["endStep"], "units": k["units"]}})
+                            "grib": {"shortName": k["shortName"], "typeOfLevel": k["typeOfLevel"], "level": k["level"], "stepType": k["stepType"], "startStep": k["startStep"], "endStep": k["endStep"], "units": k["units"], "uvRelativeToGrid": k["uvRelativeToGrid"]}})
             grib_bytes += len(buf)
             if not c: continue
-            sub = v[win["j0"]:win["j0"] + win["ny"], win["i0"]:win["i0"] + win["nx"]]
+            # Copy the crop: a numpy slice view otherwise retains every full CONUS array for every hour.
+            sub = v[win["j0"]:win["j0"] + win["ny"], win["i0"]:win["i0"] + win["nx"]].copy()
             for f in (["apcp_run", "apcp_hour"] if c == "apcp_run+hour" else [c]):
-                data[f][h] = sub; meta[f][h] = {"startStep": k["startStep"], "endStep": k["endStep"]}
+                data[f][h] = sub; meta[f][h] = {"startStep": k["startStep"], "endStep": k["endStep"], "uvRelativeToGrid": k["uvRelativeToGrid"]}
     if proj is None: raise RuntimeError("no usable messages in run")
+    for h in range(len(hours)):
+        data["w10m"][h] = wind_magnitude(data["u10"][h], data["v10"][h], meta["u10"][h], meta["v10"][h])
+        if data["w10m"][h] is not None: meta["w10m"][h] = meta["u10"][h]
+    if field_checks.get("u10", {}).get("fh") is not None and field_checks.get("u10", {}).get("fh") == field_checks.get("v10", {}).get("fh"):
+        points = []
+        for u, v in zip(field_checks["u10"]["points"], field_checks["v10"]["points"]):
+            if u["name"] != v["name"] or u["cell"] != v["cell"]: raise RuntimeError("wind checkpoint cells do not match")
+            points.append({**u, "value": math.hypot(u["value"], v["value"]), "components": {"u": u["value"], "v": v["value"]}})
+        field_checks["w10m"] = {"fh": field_checks["u10"]["fh"], "method": "hypot of independently sampled GRIB components", "points": points}
     os.makedirs(out_dir, exist_ok=True)
     files, missing = {}, {}
     ny, nx = win["ny"], win["nx"]
@@ -293,12 +341,13 @@ def process_run(cycle, nhours, out_dir, workers=6, log=print):
     grid_raw = np.stack([geo["lat"], geo["lon"]]).astype("<f4").tobytes(); grid_gz = gzip.compress(grid_raw, 9, mtime=0)
     with open(os.path.join(out_dir, "latlon.bin.gz"), "wb") as fp: fp.write(grid_gz)
     manifest = {
-        "schema": 1, "version": VERSION, "model": "HRRR", "domain": "CONUS 3 km", "cycle": cycle.strftime("%Y-%m-%dT%H:00:00Z"),
+        "schema": 1, "version": VERSION, "productVersion": PACKAGE, "model": "HRRR", "domain": "CONUS 3 km", "cycle": cycle.strftime("%Y-%m-%dT%H:00:00Z"),
         "hours": hours, "valid": [(cycle + dt.timedelta(hours=fh)).strftime("%Y-%m-%dT%H:00:00Z") for fh in hours],
         "box": BOX, "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **{k: proj[k] for k in GRID_KEYS}, **win,
                              "georefMaxErrorCells": geo["maxErrorCells"], "checkpoints": checks, "corners": geo["corners"], "latlon": {"file": "latlon.bin.gz", "gzipBytes": len(grid_gz), "layout": "float32[2][ny][nx] (lat, lon)"}},
         "fields": {f: {**FIELDS[f], **files[f], "missingHours": missing[f], "layout": f"{FIELDS[f]['dtype']}[hours][ny][nx] little-endian; value = stored * scale; missing = {MISS16 if FIELDS[f]['dtype'] == 'int16' else MISSU16}",
                        "intervals": [m if m else None for m in meta[f]]} for f in FIELDS},
+        "fieldCheckpoints": field_checks,
         "precipNotes": "apcp_hour holds the GRIB (N-1)-N h accumulation and apcp_run the GRIB 0-N h accumulation, each read from the message's own startStep/endStep. "
                        "Longer windows are sums of consecutive apcp_hour fields from this run only and are unavailable unless every hour in the window is present. f00 has no accumulation.",
         "sources": sources, "gribBytesDownloaded": grib_bytes, "browserPayloadBytes": sum(x["gzipBytes"] for x in files.values()) + len(grid_gz),
@@ -317,6 +366,18 @@ def carry(site_url, rel, dest, files):
         b = http(f"{site_url}/{rel}/{name}")
         if sha and hashlib.sha256(b).hexdigest() != sha: raise RuntimeError(f"hash mismatch for {rel}/{name}")
         with open(os.path.join(dest, name), "wb") as fp: fp.write(b)
+
+
+def carry_package(site_url, rel, root):
+    """Carry one immutable package, including legacy URLs retained through later deployments."""
+    if not rel.startswith("data/hrrr/") or ".." in rel.split("/") or rel.startswith("/"):
+        raise RuntimeError("invalid package path")
+    man = json.loads(http(f"{site_url}/{rel}/manifest.json"))
+    files = {**{v["file"]: v["sha256"] for v in man["fields"].values()}, "latlon.bin.gz": None}
+    if any(name != os.path.basename(name) for name in files): raise RuntimeError("invalid package file name")
+    dest = os.path.join(root, rel); carry(site_url, rel, dest, files)
+    with open(os.path.join(dest, "manifest.json"), "w") as fp: json.dump(man, fp, separators=(",", ":"))
+    return man
 
 
 def main():
@@ -343,26 +404,28 @@ def main():
     if not keep: raise SystemExit("no usable HRRR run found")
     runs, failures = [], []
     for c, role, n in keep:
-        rid = c.strftime("%Y%m%d%H"); dest = os.path.join(data_dir, rid); rel = f"data/hrrr/{rid}"
+        rid = c.strftime("%Y%m%d%H"); rel = f"data/hrrr/{rid}/{PACKAGE}"; dest = os.path.join(a.site, rel)
+        old = have.get(rid); oldrel = old.get("path", f"data/hrrr/{rid}") if old else None
         try:
-            if rid in have and have[rid].get("hoursExpected") == n:
-                m0 = json.loads(http(f"{a.published}/{rel}/manifest.json"))
-                carry(a.published, rel, dest, {**{v["file"]: v["sha256"] for v in m0["fields"].values()}, "latlon.bin.gz": None})
-                with open(os.path.join(dest, "manifest.json"), "w") as fp: json.dump(m0, fp, separators=(",", ":"))
-                m = m0; how = "carried forward"
+            if old and old.get("hoursExpected") == n and old.get("productVersion") == PACKAGE:
+                m = carry_package(a.published, rel, a.site); how = "carried forward"
             else:
                 m = process_run(c, n, dest); how = "processed"
-            runs.append({"id": rid, "cycle": m["cycle"], "role": role, "hoursExpected": n, "hours": len(m["hours"]), "path": rel,
+            # Keep the old immutable URLs for as long as this run is retained, not merely this deploy.
+            history = list(dict.fromkeys(([oldrel] if oldrel and oldrel != rel else []) + (old.get("previousPaths", []) if old else [])))
+            for previous in history: carry_package(a.published, previous, a.site)
+            runs.append({"id": rid, "cycle": m["cycle"], "productVersion": m.get("productVersion", "legacy"), "role": role, "hoursExpected": n,
+                         "hours": len(m["hours"]), "path": rel, "previousPaths": history,
                          "missing": {f: v["missingHours"] for f, v in m["fields"].items() if v["missingHours"]},
                          "gribBytesDownloaded": m["gribBytesDownloaded"], "browserPayloadBytes": m["browserPayloadBytes"], "how": how})
         except Exception as e:
             failures.append({"id": rid, "error": str(e)[:300]})
-            if rid in have:  # keep the previously published copy rather than lose the run
+            shutil.rmtree(dest, ignore_errors=True)
+            if old:
                 try:
-                    m0 = json.loads(http(f"{a.published}/{rel}/manifest.json"))
-                    carry(a.published, rel, dest, {**{v["file"]: v["sha256"] for v in m0["fields"].values()}, "latlon.bin.gz": None})
-                    with open(os.path.join(dest, "manifest.json"), "w") as fp: json.dump(m0, fp, separators=(",", ":"))
-                    runs.append({**have[rid], "how": "kept previous copy after failure"})
+                    carry_package(a.published, oldrel, a.site)
+                    for previous in old.get("previousPaths", []): carry_package(a.published, previous, a.site)
+                    runs.append({**old, "role": role, "how": "kept previous copy after failure"})
                 except Exception as e2: failures.append({"id": rid, "error": "previous copy unavailable: " + str(e2)[:200]})
     if not runs: raise SystemExit("nothing publishable: " + json.dumps(failures))
     if failures and not any(r["role"].startswith("latest") for r in runs):

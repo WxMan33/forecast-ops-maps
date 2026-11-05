@@ -16,7 +16,7 @@ Index sizes: wrfsfc 167 field/level pairs (~150 MB per hour for the whole file),
 | Echo tops | direct | RETOP cloud top | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 0.29 |  |
 | Vertically integrated liquid | direct | VIL entire atmosphere | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 0.45 |  |
 | Precipitation type (rain/snow/ice pellets/freezing rain) | direct | CRAIN, CSNOW, CICEP, CFRZR surface | instantaneous categorical | f00–f18 every run; to f48 at 00/06/12/18Z | 0.10 | combine with reflectivity for typed radar |
-| Total / low / mid / high cloud cover | direct | TCDC, LCDC, MCDC, HCDC | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 2.17 |  |
+| Total / low / mid / high cloud cover | **total live; others direct** | TCDC, LCDC, MCDC, HCDC | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 2.17 |  |
 | Simulated IR / water-vapour satellite | direct | SBT113, SBT114, SBT123, SBT124 top of atmosphere | instantaneous brightness temperature | f00–f18 every run; to f48 at 00/06/12/18Z | 2.41 | channel mapping to GOES bands to be confirmed before labelling |
 | Lightning threat | direct | LTNG entire atmosphere | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 0.04 |  |
 
@@ -25,10 +25,10 @@ Index sizes: wrfsfc 167 field/level pairs (~150 MB per hour for the whole file),
 | Product | Status | GRIB field / level | Interval | Hours | MB per hour (CONUS) | Notes |
 |---|---|---|---|---|---|---|
 | 2-m temperature | **live in v1** | TMP 2 m above ground | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.15 |  |
-| 2-m dew point | direct | DPT 2 m above ground | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.16 |  |
+| 2-m dew point | **live: surface-v2** | DPT 2 m above ground | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.16 |  |
 | 2-m relative humidity | direct | RH 2 m above ground | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.57 |  |
-| 10-m wind (speed, barbs/streamlines) | direct | UGRD, VGRD 10 m above ground | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 4.53 | grid-relative components: rotate to earth-relative before display |
-| Surface wind gust | direct | GUST surface | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.24 |  |
+| 10-m wind (speed, barbs/streamlines) | **speed live; vectors later** | UGRD, VGRD 10 m above ground | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 4.53 | grid-relative components: rotate to earth-relative before display |
+| Surface wind gust | **live: surface-v2** | GUST surface | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.24 |  |
 | Hourly max 10-m wind | direct | MAXUW, MAXVW 10 m | max over (N−1)–N h | f01+ (no value at f00) | 2.63 |  |
 | Mean sea-level pressure (isobars) | direct | MSLMA mean sea level | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 0.61 | MAPS reduction; label as such |
 | Visibility | direct | VIS surface | instantaneous | f00–f18 every run; to f48 at 00/06/12/18Z | 1.42 |  |
