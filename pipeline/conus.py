@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hrrr  # noqa: E402
 
 PRODUCT = "conus-v1"
+PACK = False   # --pack: one file per field and forecast hour (for object storage with HTTP range requests); see process_hour
 TILE = 256
 LEVELS = (0, 1, 2)
 UTC = dt.timezone.utc
@@ -172,20 +173,41 @@ def process_hour(cycle, fh, field, out_dir, grid=None):
     run = dt.datetime.strptime(f"{k['dataDate']}{int(k['dataTime']):04d}", "%Y%m%d%H%M").replace(tzinfo=UTC)
     if run != cycle: raise RuntimeError(f"f{fh:02d} message is from run {run:%Y%m%d%H}")
     spec = FIELDS[field]; q = hrrr.encode(field, v).astype(np.int16)
-    d = os.path.join(out_dir, field, f"f{fh:02d}"); os.makedirs(d, exist_ok=True)
-    files = {}
-    for L in LEVELS:
-        for name, t in tiles_for(q, L, spec["coarse"], spec["displayStep"]):
-            b = encode_tile(t)
-            with open(os.path.join(d, name), "wb") as fp: fp.write(b)
-            files[name] = [len(b), hashlib.sha256(b).hexdigest()[:16]]
-    rec = {"files": files, "bytes": {f"L{L}": sum(v[0] for n, v in files.items() if n.startswith(f"L{L}_")) for L in LEVELS},
+    files, pack = {}, None
+    if PACK:
+        # Packed: every tile is its own gzip member inside one file per field-hour, coarsest level first and each level
+        # row by row, so a view's tiles in one row are one contiguous byte range. The manifest lists [offset, length].
+        os.makedirs(os.path.join(out_dir, field), exist_ok=True)
+        parts, names = [], []
+        for L in sorted(LEVELS, reverse=True):
+            for name, t in tiles_for(q, L, spec["coarse"], spec["displayStep"]):
+                parts.append(encode_tile(t)); names.append(name)
+        blob = b"".join(parts); rel = f"{field}/f{fh:02d}.pack"
+        with open(os.path.join(out_dir, rel), "wb") as fp: fp.write(blob)
+        # lengths in PACK_ORDER (levels coarsest first, each row by row); offsets are their running sum
+        pack = {"file": rel, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(), "lengths": [len(b) for b in parts]}
+        sizes = dict(zip(names, pack["lengths"]))
+    else:
+        d = os.path.join(out_dir, field, f"f{fh:02d}"); os.makedirs(d, exist_ok=True)
+        for L in LEVELS:
+            for name, t in tiles_for(q, L, spec["coarse"], spec["displayStep"]):
+                b = encode_tile(t)
+                with open(os.path.join(d, name), "wb") as fp: fp.write(b)
+                files[name] = [len(b), hashlib.sha256(b).hexdigest()[:16]]
+        sizes = {n: v[0] for n, v in files.items()}
+    rec = {**({"pack": pack} if pack else {"files": files}), "bytes": {f"L{L}": sum(v for n, v in sizes.items() if n.startswith(f"L{L}_")) for L in LEVELS},
            "source": {"url": url, **src}, "seconds": {"download": round(t1 - t0, 2), "process": round(time.time() - t1, 2)},
            "missingCells": int((q == MISS).sum())}
     return rec, g, geo
 
 
 def carry_hour(site_url, rel, field, fh, rec, out_dir):
+    if "pack" in rec:
+        pk = rec["pack"]; b = hrrr.http(f"{site_url}/{rel}/{pk['file']}")
+        if len(b) != pk["bytes"] or hashlib.sha256(b).hexdigest() != pk["sha256"]: raise RuntimeError(f"hash mismatch for {rel}/{pk['file']}")
+        os.makedirs(os.path.join(out_dir, field), exist_ok=True)
+        with open(os.path.join(out_dir, pk["file"]), "wb") as fp: fp.write(b)
+        return
     d = os.path.join(out_dir, field, f"f{fh:02d}"); os.makedirs(d, exist_ok=True)
     def one(item):
         name, (n, sha) = item
@@ -231,7 +253,8 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
         "hours": have, "valid": {str(h): (cycle + dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in have},
         "noaaPostedAt": {str(h): posted[h] for h in have if h in posted},
         "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo,
-        "tile": TILE, "levels": levels,
+        "tile": TILE, "levels": levels, "layout": "packed" if PACK else "tiles",
+        **({"packOrder": "levels from coarsest to native; within a level, tile rows from south (ty=0) to north, tiles west to east; each tile a separate gzip member"} if PACK else {}),
         "encoding": "gzip of [low bytes][high bytes] of zigzag-coded int16 row differences (mod 2^16), row-major per tile; L0 value = stored * scale, L1/L2 value = stored * scale * displayStep; -32768 = missing",
         "fields": {f: {**{k: v for k, v in FIELDS[f].items() if k not in ("idx", "classify")}, "missingSentinel": MISS, "hours": fields[f]["hours"]} for f in FIELDS},
         "updatedAt": dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -259,7 +282,10 @@ def main():
     ap.add_argument("--carry-only", action="store_true", help="republish the live CONUS data unchanged")
     ap.add_argument("--max-hours", type=int, default=None, help="limit hours per run (local tests)")
     ap.add_argument("--changed-output", default=None)
+    ap.add_argument("--pack", action="store_true", help="one packed file per field-hour (object storage + HTTP range requests)")
     a = ap.parse_args()
+    global PACK, PRODUCT
+    if a.pack: PACK, PRODUCT = True, "conus-v1-packed"
     now = dt.datetime.fromisoformat(a.now).replace(tzinfo=UTC) if a.now else dt.datetime.now(UTC)
     root = os.path.join(a.site, "data", "conus")
     try: prev = json.loads(hrrr.http(f"{a.published}/data/conus/index.json"))
