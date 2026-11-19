@@ -1,4 +1,4 @@
-# Builds the HRRR Tri-State map packages and publishes them with GitHub Pages (Actions artifact
+# Builds the HRRR Tri-State map packages and the full-CONUS beta tiles, and publishes them with GitHub Pages (Actions artifact
 # deployment: no data branch, no history growth). A deployment happens only after the whole site has
 # been assembled and checked, so a failed run leaves the previous deployment in place.
 name: HRRR maps
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      changed: ${{ steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' }}
+      changed: ${{ steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || steps.conus.outputs.conus_changed == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +30,15 @@ jobs:
         run: |
           mkdir -p _site && cp -r site/. _site/
           python pipeline/hrrr.py --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT"
+      - name: Full-CONUS HRRR tiles (beta; conus-v1)
+        id: conus
+        # Separate from the Tri-State packages: a failure republishes the previous CONUS data unchanged
+        # (or none), and never blocks the Tri-State deployment.
+        run: |
+          python pipeline/test_conus.py \
+            && python pipeline/conus.py --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT" \
+            || python pipeline/conus.py --carry-only --site _site --published "https://wxman33.github.io/forecast-ops-maps" \
+            || echo "::warning::CONUS tiles unavailable this run"
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - name: Trend archive self-test
@@ -42,7 +51,7 @@ jobs:
           node archive/trends.js --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT" \
             || node archive/trends.js --carry-only --site _site --published "https://wxman33.github.io/forecast-ops-maps" \
             || echo "::warning::trend archive unavailable this run"
-      - if: steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || github.event_name != 'schedule'
+      - if: steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || steps.conus.outputs.conus_changed == 'true' || github.event_name != 'schedule'
         uses: actions/upload-pages-artifact@v3
         with: { path: _site }
   deploy:
