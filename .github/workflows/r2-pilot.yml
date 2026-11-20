@@ -1,0 +1,33 @@
+# R2 pilot (manual only): build the packed full-CONUS tiles and upload them to a Cloudflare R2 bucket.
+# Needs, in this repository's Settings → Secrets and variables → Actions:
+#   secrets   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY   (bucket-scoped R2 token: Object Read & Write, that bucket only)
+#   variables R2_ACCOUNT_ID, R2_BUCKET, R2_PUBLIC_URL  (e.g. forecast-ops-conus-pilot, https://pub-….r2.dev)
+# Runs only when started by hand; the GitHub Pages maps are not touched.
+name: R2 pilot (CONUS packed tiles)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency: { group: r2-pilot, cancel-in-progress: false }
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install -q -r pipeline/requirements.txt boto3==1.35.99
+      - name: Self-test
+        run: python pipeline/test_conus.py
+      - name: Build packed tiles (hours already in the bucket are carried, new hours processed)
+        run: python pipeline/conus.py --pack --site _r2 --published "${R2_PUBLIC_URL%/}"
+      - name: Upload changes to R2 and remove expired runs
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python pipeline/r2_sync.py --site _r2 | tee -a "$GITHUB_STEP_SUMMARY"
