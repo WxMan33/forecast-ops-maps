@@ -45,7 +45,8 @@ def _param(k, d, c, n): return (k["discipline"], k["parameterCategory"], k["para
 
 def _get(url, rows, var, level, step, check, fh):
     """One message by .idx line, confirmed from its GRIB keys; returns (keys, values, source record)."""
-    cand = [r for r in rows if r["var"] == var and r["level"] == level and r["step"] == step]
+    steps = step if isinstance(step, list) else [step]
+    cand = [r for r in rows if r["var"] == var and r["level"] == level and r["step"] in steps]
     if not cand: raise RuntimeError(f"{var} {level} '{step}' not in the index")
     for r in cand:
         buf = hrrr.http(url, (r["start"], r["end"])); k, v = decode(buf)
@@ -69,7 +70,12 @@ def read_refc(url, rows, fh, rows_of):
     return k, v, [s]
 
 
-def _step_acc(a, b): return f"{a}-{b} hour acc fcst"
+def _step_acc(a, b):
+    """The .idx wording of an a-b hour accumulation. wgrib2 writes whole days as days: at F24 the run total is
+    '0-1 day acc fcst', at F48 '0-2 day acc fcst' (21 Nov 2026 12Z). The GRIB step keys are checked either way."""
+    out = [f"{a}-{b} hour acc fcst"]
+    if a % 24 == 0 and b % 24 == 0: out.append(f"{a // 24}-{b // 24} day acc fcst")
+    return out
 
 
 def read_apcp1h(url, rows, fh, rows_of):

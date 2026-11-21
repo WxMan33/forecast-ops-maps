@@ -105,6 +105,8 @@ try:
     except RuntimeError: ok(True, "a run-total decrease larger than packing noise fails the hour instead of publishing")
 finally:
     FX._get = real_get
+ok(FX._step_acc(0, 24) == ["0-24 hour acc fcst", "0-1 day acc fcst"] and FX._step_acc(23, 24) == ["23-24 hour acc fcst"] and FX._step_acc(0, 48)[1] == "0-2 day acc fcst",
+   "run totals at F24/F48 are found under the index's day wording (0-1 day, 0-2 day) as well as hours")
 ok(FX.encode("apcp1h", np.array([[0.0123, np.nan]])).tolist() == [[12, -32768]], "precipitation stored in thousandths of an inch; NaN stays missing")
 
 print(f"ok - {n} CONUS packager checks passed")
