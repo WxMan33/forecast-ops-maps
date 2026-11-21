@@ -136,3 +136,27 @@ Verification of identity and units (live 16Z and 18Z 21 Nov 2026 runs): every re
 | Hosting on Cloudflare R2 | pilot blocked: repository settings `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET` (and `R2_PUBLIC_URL`) are not set; R2 storage terms to review with the account |
 | ECMWF IFS/AIFS open data | per the user, ECMWF permits commercial use and redistribution of its open subset with attribution; field list, delivery (latency, resolution) and the exact attribution text to be confirmed before use |
 | NBM, RRFS, GFS | NOAA open data like HRRR; each dataset's registry page and field identities to be checked as above before publishing |
+
+## Hosting: measured use and estimated R2 cost
+
+Measured (21 Nov 2026, seven HRRR fields): **2.5 MB per forecast hour** published for all seven fields (temperature 1.34, reflectivity 0.53, run-total precipitation 0.29, 1-h precipitation 0.19, type 0.07, run-total snow 0.06, 1-h snow 0.04; wet days larger). Three retained runs ≈ 117 forecast hours ≈ **0.3 GB** (0.5 GB on stormy days). A full rebuild processed 540 field-hours in 193 s on a GitHub runner.
+
+Requests (phone, measured on the preview with the one-file-per-tile layout): cold load 8, zoom to a metro 8–12, every hour of a run ready to loop 94–104 per field. The packed layout (one file per field and hour, read with HTTP range requests) groups a view's tiles into one request per tile row per hour; GitHub Pages already answers those with `206 Partial Content` (checked), and R2 must do the same.
+
+R2 estimate, using Cloudflare's published R2 rates as last known (storage $0.015 per GB-month, writes/lists $4.50 per million, reads $0.36 per million, no egress fees; monthly free allowance 10 GB, 1 M writes, 10 M reads). **Confirm current rates on the Cloudflare account before relying on these.**
+
+| Scale | Storage | Writes / month | Reads / month | Est. monthly cost |
+|---|---|---|---|---|
+| Pilot: HRRR, 7 fields, 3 runs, ~20 staff | 0.3–0.5 GB | ≈ 130 k (≈ 4,000 hour files a day + manifests) | ≈ 1–2 M (20 people × 10 sessions/day × ~200) | **$0** (inside the free allowance) |
+| Expanded: HRRR ~30 fields + NBM, RRFS, GFS, ECMWF; ~200 users | 30–50 GB | ≈ 3 M | ≈ 50 M | **≈ $25** ($0.3–0.6 storage + $9 writes + $14 reads) |
+
+Reads served from Cloudflare's cache on a custom domain are not R2 reads, so a cached public endpoint lowers the read line further. GitHub Pages is fine for a preview, but its terms are not meant for a commercial service and it has a 1 GB site guideline, which the expanded scale would exceed.
+
+## After HRRR (scope only; nothing built)
+
+| Model | Use on shift | Source and terms to confirm | First fields | Notes |
+|---|---|---|---|---|
+| NBM (National Blend of Models) | planning: hourly/3-h blended precip, snow, PoP, wind to day 7+ | NOAA open data (AWS registry `noaa-nbm-grib2-pds`), same NOAA terms as HRRR; confirm the registry page | QPF 1/6 h, snow 6/24 h, PoP, ice accumulation | 2.5 km CONUS grid; percentile snow products are high value for planning |
+| RRFS | high-resolution comparison with HRRR | NOAA open data (AWS `noaa-rrfs-pds`); RRFS is pre-operational: label it and track NOAA's status | same seven fields as HRRR | 3 km; side-by-side or A/B compare with HRRR |
+| GFS | medium range, CONUS and global | NOAA open data (AWS `noaa-gfs-bdp-pds`) | 6-h precip, snow, MSLP, 500 mb heights, 2-m temperature | 0.25° grid; different projection (lat/lon) for the viewer |
+| ECMWF IFS / AIFS open data | medium range comparison | ECMWF open data; per the user, commercial use and redistribution permitted with attribution; confirm the licence text, field list, resolution and delivery latency first | 6-h precip, MSLP, 500 mb heights, 2-m temperature | open subset is 0.25°; snowfall availability to confirm |
