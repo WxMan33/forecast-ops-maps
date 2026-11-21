@@ -61,22 +61,50 @@ G = {"gridType": "lambert", "Nx": 1799, "Ny": 1059, "DxInMetres": 3000.0, "i0": 
 calls = {"carry": [], "proc": []}
 real_carry, real_proc = conus.carry_hour, conus.process_hour
 conus.carry_hour = lambda site, rel, f, fh, rec, out: calls["carry"].append(fh)
-def fake_proc(cycle, fh, field, out, grid=None):
+def fake_proc(cycle, fh, field, out, grid=None, rows_of=None):
     if grid is not None and grid != G: raise RuntimeError("grid changed")
-    calls["proc"].append(fh); return {"files": {}, "bytes": {"L0": 1, "L1": 1, "L2": 1}}, dict(G), ({"maxErrorCells": 0.0} if grid is None else None)
+    calls["proc"].append((field, fh)); return {"files": {}, "bytes": {"L0": 1, "L1": 1, "L2": 1}}, dict(G), ({"maxErrorCells": 0.0} if grid is None else None)
 conus.process_hour = fake_proc
 try:
     old = {"grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **G}, "georef": {"maxErrorCells": 0.0},
            "fields": {"t2m": {"hours": {str(h): {"files": {}, "bytes": {"L0": 1, "L1": 1, "L2": 1}} for h in range(3)}}}}
     with tempfile.TemporaryDirectory() as d:
         man, p = conus.build_run(c(18), "latest", 18, False, {h: "x" for h in range(6)}, d, "data/conus/hrrr/x/conus-v1", old, "http://site", log=lambda *a: None)
-    ok(calls["carry"] == [0, 1, 2] and sorted(calls["proc"]) == [3, 4, 5] and p == 3 and man["hours"] == list(range(6)) and man["status"] == "in progress",
-       f"carried {calls['carry']}, processed {sorted(calls['proc'])}, status {man['status']}")
+    others = [f for f in conus.FIELDS if f != "t2m"]
+    ok(calls["carry"] == [0, 1, 2] and sorted(h for f, h in calls["proc"] if f == "t2m") == [3, 4, 5]
+       and all(sorted(h for f2, h in calls["proc"] if f2 == f) == list(range(6)) for f in others)
+       and p == 3 + 6 * len(others) and man["hours"] == list(range(6)) and man["status"] == "in progress",
+       f"carried {calls['carry']}, t2m processed {sorted(h for f, h in calls['proc'] if f == 't2m')}, {len(others)} new fields x 6 hours, status {man['status']}")
 finally:
     conus.carry_hour, conus.process_hour = real_carry, real_proc
 
 # 6. every product carries its source, derivation, attribution and redistribution terms
 for f, spec in conus.FIELDS.items():
     ok(all(spec.get(k) for k in ("source", "derivation", "attribution", "terms")), f"{f}: provenance recorded")
+
+# 7. new fields: precipitation-type precedence, snowfall differencing, f00 not applicable (synthetic arrays; no network)
+import numpy as np  # noqa: E402
+import fields as FX  # noqa: E402
+def fake_get(flags):
+    def get(url, rows, var, level, step, check, fh):
+        k = {"Nx": 2, "Ny": 1}; return k, np.array([flags[var]], float), {"idx": var, "grib": {}}
+    return get
+real_get = FX._get
+try:
+    FX._get = fake_get({"CRAIN": [1, 1], "CSNOW": [1, 0], "CICEP": [0, 0], "CFRZR": [1, 0]})
+    k, v, s = FX.read_ptype("u", [], 3, None)
+    ok(v.tolist() == [[4, 1]], f"precipitation type: freezing rain wins over snow and rain; rain alone stays rain ({v.tolist()})")
+    try: FX.read_ptype("u", [], 0, None); ok(False, "f00 type should be not applicable")
+    except FX.NotApplicable: ok(True, "f00 precipitation type is not applicable (HRRR analysis has no type)")
+    runs = {5: [0.10, 0.20], 6: [0.12, 0.19999]}   # metres of snow, run totals at f05 and f06
+    FX._get = lambda url, rows, var, level, step, check, fh: ({"Nx": 2, "Ny": 1}, np.array([runs[fh]]), {"idx": var, "grib": {}})
+    k, v, s = FX.read_asnow1h("u", [], 6, lambda fh: ("u", []))
+    ok(np.allclose(v, [[0.02 * FX.IN_PER_M, 0.0]]) and s[0]["derivation"]["largestDecreaseClippedIn"] > 0, f"1-h snowfall = run-total difference; tiny decreases set to 0 ({v.round(3).tolist()})")
+    runs[6] = [0.10, 0.10]
+    try: FX.read_asnow1h("u", [], 6, lambda fh: ("u", [])); ok(False, "a large decrease should fail the hour")
+    except RuntimeError: ok(True, "a run-total decrease larger than packing noise fails the hour instead of publishing")
+finally:
+    FX._get = real_get
+ok(FX.encode("apcp1h", np.array([[0.0123, np.nan]])).tolist() == [[12, -32768]], "precipitation stored in thousandths of an inch; NaN stays missing")
 
 print(f"ok - {n} CONUS packager checks passed")

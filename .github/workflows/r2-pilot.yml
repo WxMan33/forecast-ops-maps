@@ -27,6 +27,7 @@ jobs:
       - name: Build packed tiles (hours already in the bucket are carried, new hours processed)
         run: python pipeline/conus.py --pack --site _r2 --published "${R2_PUBLIC_URL%/}"
       - name: Upload changes to R2 and remove expired runs
+        shell: bash   # -o pipefail: a missing setting or failed upload fails the run (tee alone would hide it)
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

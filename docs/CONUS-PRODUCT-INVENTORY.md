@@ -97,3 +97,42 @@ Bytes as the pipeline would publish them (L0 full precision + L1/L2 display leve
 ## Hosting (decision point)
 
 GitHub Pages (about 1 GB per site) holds 2-m temperature for three runs (about 120–170 MB) alongside the Tri-State maps. The twelve daily-use fields at the current precision would need roughly 0.9 GB for the same three runs, and the busiest stormy days more. Options, measured costs and a recommendation are in the release notes for this beta.
+
+## Commercial rights per field (Model Maps preview, 21 Nov 2026)
+
+Decision rule: a field goes on the **commercial preview** only when its upstream dataset, terms and attribution are written down here and every asset drawn with it (basemap, labels, fonts, colours) is cleared below. Anything unresolved stays off.
+
+Upstream dataset for every field below: **NOAA/NCEP HRRR CONUS 3 km**, `wrfsfcfNN.grib2`, bucket `noaa-hrrr-bdp-pds` (NOAA Open Data Dissemination on the AWS Registry of Open Data). Terms: <https://registry.opendata.aws/noaa-hrrr-pds/> (NOAA Open Data Dissemination; U.S. Government work, no U.S. copyright; no restriction on use or redistribution). Attribution text used on the map, PNG and manifests: **"Data: NOAA/NCEP HRRR · Forecast Ops output · Model guidance, not an official forecast · Not endorsed by NOAA"**.
+
+| Field (id) | Exact GRIB source, checked per message | Derivation | Rendered map | PNG export | Downloadable data (our tiles) | Status |
+|---|---|---|---|---|---|---|
+| 2-m temperature (`t2m`) | TMP 2 m above ground, 0/0/0, instant, K | K → °F | yes | yes | yes | **ready** |
+| Composite reflectivity, simulated (`refc`) | REFC entire atmosphere, 0/16/196, instant, dB | none; labelled "simulated, not radar" everywhere | yes | yes | yes | **ready** |
+| Precipitation type (`ptype`) | CRAIN 0/1/33, CSNOW 0/1/36, CICEP 0/1/35, CFRZR 0/1/34; surface, instant, code table 4.222 | one category per cell; freezing rain > ice pellets > snow > rain (precedence in the legend note); F00 not applicable (HRRR's analysis sets no flags) | yes | yes | yes | **ready** |
+| 1-h precipitation (`apcp1h`) | APCP surface 0/1/8, accum (stat. 1) over (N−1)–N h, kg m⁻² | mm → in; F00 not applicable | yes | yes | yes | **ready** |
+| Precipitation since run start (`apcp_run`) | APCP surface 0/1/8, accum 0–N h, kg m⁻² | mm → in; F00 not applicable | yes | yes | yes | **ready** |
+| Snowfall since run start, HRRR (`asnow_run`) | ASNOW surface 0/1/29 (NCEP local "Total Snowfall"; eccodes names it "unknown", identity checked by the number triple), accum 0–N h, m | m → in; HRRR's variable-density snow, not 10:1 | yes | yes | yes | **ready** |
+| 1-h snowfall, HRRR (`asnow1h`) | ASNOW 0–N and 0–(N−1) of the same run (HRRR publishes no hourly ASNOW) | difference; drops ≤ 0.05 in (packing noise) set to 0, larger ones fail the hour; labelled as derived | yes | yes | yes | **ready** |
+
+Verification of identity and units (live 16Z and 18Z 21 Nov 2026 runs): every reader rejects a message whose discipline/category/number, level type, statistical processing, step window or units differ (the first draft named the type flags 0/1/192–195 and was rejected by this check before anything was published). ASNOW's metre units were confirmed against the same run's new snow water equivalent: median snow-to-liquid ratio 11.9:1 (10th–90th percentile 6.9–15.4) over 4,528 cells with > 2 mm of new liquid. Every CI build compares the built tiles with the GRIB grid at 21 airports, each field's maximum and three random non-zero cells, on all three zoom levels (`pipeline/spotcheck_conus.py`), and republishes the previous data if any cell differs.
+
+### Everything else drawn with the fields
+
+| Asset | Source | Licence / terms | Required credit | Commercial preview |
+|---|---|---|---|---|
+| State lines | U.S. Census Bureau cartographic boundaries via us-atlas 3.0.1 | Census data: U.S. Government work; us-atlas code/packaging: ISC (`assets/maps/us-atlas-LICENSE`) | "U.S. Census Bureau boundaries via us-atlas" (on map and PNG) | cleared |
+| Coastline, borders, lakes, city points | Natural Earth (via world-atlas 2.0.2 and NE 10m/50m v5.1.2) | public domain (<https://www.naturalearthdata.com/about/terms-of-use/>) | none required; credited anyway | cleared |
+| Map label glyphs | Open Sans Semibold SDF glyphs (openmaptiles/fonts via MapLibre demotiles), self-hosted | Apache 2.0 (`assets/maps/fonts/open-sans-v1/LICENSE.txt`) | licence file shipped with the glyphs | cleared |
+| Page and PNG fonts | Archivo Black (Google Fonts) for page headings; PNG text uses Archivo when the browser has it, else the system sans-serif | SIL Open Font License 1.1 (Google Fonts); system fonts are not embedded or redistributed | none in the image | cleared |
+| Map library | MapLibre GL JS 4.7.1, self-hosted | BSD 3-Clause (`assets/vendor/maplibre-gl-LICENSE.txt`) | licence file shipped | cleared |
+| Colour scales | Forecast Ops' own stops for temperature, reflectivity, precipitation, snow and type (CONUS viewer) | ours | "Colors and rendering: Forecast Ops" | cleared |
+| Tri-State viewer precipitation colours (not used on the CONUS preview) | ColorBrewer Greens / YlGnBu / RdPu values | Apache 2.0; needs "Colors from www.ColorBrewer.org by Cynthia A. Brewer" | add the credit or replace before that viewer is sold | **review** (outside this preview) |
+
+### Not on the commercial preview yet
+
+| Item | Why |
+|---|---|
+| Snowfall 10:1 (WEASD × 10), Kuchera snowfall, freezing-rain accumulation | fields not built yet; WEASD is verified (0/1/13, accum, kg m⁻²) |
+| Hosting on Cloudflare R2 | pilot blocked: repository settings `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET` (and `R2_PUBLIC_URL`) are not set; R2 storage terms to review with the account |
+| ECMWF IFS/AIFS open data | per the user, ECMWF permits commercial use and redistribution of its open subset with attribution; field list, delivery (latency, resolution) and the exact attribution text to be confirmed before use |
+| NBM, RRFS, GFS | NOAA open data like HRRR; each dataset's registry page and field identities to be checked as above before publishing |

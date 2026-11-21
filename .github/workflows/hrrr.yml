@@ -30,14 +30,17 @@ jobs:
         run: |
           mkdir -p _site && cp -r site/. _site/
           python pipeline/hrrr.py --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT"
-      - name: Full-CONUS HRRR tiles (beta; conus-v1)
+      - name: Full-CONUS HRRR tiles (beta; conus-v1) and source-grid spot check
         id: conus
         # Separate from the Tri-State packages: a failure republishes the previous CONUS data unchanged
-        # (or none), and never blocks the Tri-State deployment.
+        # (or none), and never blocks the Tri-State deployment. Before publishing, every field of the newest
+        # run's f06 is decoded from the built tiles and compared with the GRIB grid (airports, the field's
+        # maximum and random non-zero cells, all three zoom levels); any mismatch republishes the previous data.
         run: |
           python pipeline/test_conus.py \
             && python pipeline/conus.py --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT" \
-            || python pipeline/conus.py --carry-only --site _site --published "https://wxman33.github.io/forecast-ops-maps" \
+            && python pipeline/spotcheck_conus.py _site auto 6 --json _site/data/conus/spotcheck.json \
+            || (rm -rf _site/data/conus && python pipeline/conus.py --carry-only --site _site --published "https://wxman33.github.io/forecast-ops-maps") \
             || echo "::warning::CONUS tiles unavailable this run"
       - uses: actions/setup-node@v4
         with: { node-version: 20 }

@@ -38,16 +38,8 @@ SITE_URL = "https://wxman33.github.io/forecast-ops-maps"
 CHECKPOINTS = hrrr.CHECKPOINTS + [("Seattle (SEA)", 47.4502, -122.3088), ("Miami (MIA)", 25.7959, -80.2870), ("Boston (BOS)", 42.3656, -71.0096),
                                   ("San Diego (SAN)", 32.7338, -117.1933), ("Denver (DEN)", 39.8561, -104.6737), ("Brownsville (BRO)", 25.9068, -97.4259)]
 
-# Every product records where it comes from, how it is made, and on what terms it may be passed on.
-NOAA_TERMS = ("NOAA/NCEP HRRR output is a U.S. Government work with no copyright restriction in the United States; NOAA Open Data "
-              "Dissemination (AWS Open Data) states no restrictions on use or redistribution. Attribute NOAA/NCEP; do not imply NOAA endorsement.")
-FIELDS = {
-    "t2m": {"label": "2-m temperature", "units": "degF", "scale": 0.1, "displayStep": 5, "coarse": "corner cell",
-            "idx": ("TMP", "2 m above ground"), "classify": "t2m",
-            "source": "NOAA HRRR wrfsfcfNN.grib2, TMP 2 m above ground (GRIB shortName 2t, heightAboveGround 2, instant, K)",
-            "derivation": "direct: K converted to degF, stored to 0.1 degF; L1/L2 display levels rounded to 0.5 degF",
-            "attribution": "NOAA/NCEP HRRR", "terms": NOAA_TERMS},
-}
+import fields as FX  # noqa: E402  every field: its GRIB identity checks, units and derivation
+FIELDS = FX.FIELDS
 
 
 def available(now):
@@ -131,18 +123,9 @@ def tiles_for(q, level, rule, step):
             yield f"L{level}_{tx}_{ty}.bin.gz", a[ty * TILE:(ty + 1) * TILE, tx * TILE:(tx + 1) * TILE]
 
 
-def fetch_field(url, fh, field):
-    """Byte-range fetch of one field; returns (grib keys, values, buffer, source record)."""
-    var, level = FIELDS[field]["idx"]
-    rows = [r for r in hrrr.idx_rows(url) if r["var"] == var and r["level"] == level]
-    if not rows: raise RuntimeError(f"{field} not in index")
-    for r in rows:
-        buf = hrrr.http(url, (r["start"], r["end"]))
-        k, v = hrrr.decode(buf)
-        if hrrr.classify(k, fh) == FIELDS[field]["classify"]:
-            return k, v, buf, {"range": [r["start"], r["end"]], "bytes": len(buf), "sha256": hashlib.sha256(buf).hexdigest(), "idx": f'{r["var"]}:{r["level"]}:{r["step"]}',
-                               "grib": {x: k[x] for x in ("shortName", "typeOfLevel", "level", "stepType", "startStep", "endStep", "units")}}
-    raise RuntimeError(f"{field}: no message with the expected GRIB metadata")
+def fetch_field(url, fh, field, rows_of):
+    """One field-hour from GRIB messages confirmed by their own metadata; returns (grib keys, display values, sources)."""
+    return FIELDS[field]["read"](url, rows_of(fh)[1], fh, rows_of)
 
 
 def grid_of(k):
@@ -163,16 +146,35 @@ def georef(buf, grid):
     return {"maxErrorCells": geo["maxErrorCells"], "corners": geo["corners"], "checkpoints": pts}
 
 
-def process_hour(cycle, fh, field, out_dir, grid=None):
+def run_rows(cycle):
+    """.idx rows per forecast hour of one run, fetched once and shared by every field (thread-safe enough: idempotent)."""
+    cache = {}
+    def rows_of(fh):
+        if fh not in cache:
+            url = f"{hrrr.BUCKET}/hrrr.{cycle:%Y%m%d}/conus/hrrr.t{cycle:%H}z.wrfsfcf{fh:02d}.grib2"
+            cache[fh] = (url, hrrr.idx_rows(url))
+        return cache[fh]
+    return rows_of
+
+
+def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
     """Fetch, verify and tile one field-hour. Returns (record, grid, georef or None)."""
-    url = f"{hrrr.BUCKET}/hrrr.{cycle:%Y%m%d}/conus/hrrr.t{cycle:%H}z.wrfsfcf{fh:02d}.grib2"
-    t0 = time.time(); k, v, buf, src = fetch_field(url, fh, field); t1 = time.time()
+    rows_of = rows_of or run_rows(cycle)
+    url = rows_of(fh)[0]
+    t0 = time.time()
+    try:
+        k, v, srcs = fetch_field(url, fh, field, rows_of)
+    except FX.NotApplicable as e:
+        return {"notApplicable": str(e)}, grid, None
+    t1 = time.time()
     g = grid_of(k); geo = None
-    if grid is None: geo = georef(buf, g)
+    if grid is None:
+        r0 = srcs[0]["range"]; geo = georef(hrrr.http(url, tuple(r0)), g)
     elif g != grid: raise RuntimeError(f"grid changed within run at f{fh:02d}")
     run = dt.datetime.strptime(f"{k['dataDate']}{int(k['dataTime']):04d}", "%Y%m%d%H%M").replace(tzinfo=UTC)
     if run != cycle: raise RuntimeError(f"f{fh:02d} message is from run {run:%Y%m%d%H}")
-    spec = FIELDS[field]; q = hrrr.encode(field, v).astype(np.int16)
+    spec = FIELDS[field]; q = FX.encode(field, v)
+    src = {"url": url, **srcs[0], **({"also": srcs[1:]} if len(srcs) > 1 else {})}
     files, pack = {}, None
     if PACK:
         # Packed: every tile is its own gzip member inside one file per field-hour, coarsest level first and each level
@@ -196,7 +198,7 @@ def process_hour(cycle, fh, field, out_dir, grid=None):
                 files[name] = [len(b), hashlib.sha256(b).hexdigest()[:16]]
         sizes = {n: v[0] for n, v in files.items()}
     rec = {**({"pack": pack} if pack else {"files": files}), "bytes": {f"L{L}": sum(v for n, v in sizes.items() if n.startswith(f"L{L}_")) for L in LEVELS},
-           "source": {"url": url, **src}, "seconds": {"download": round(t1 - t0, 2), "process": round(time.time() - t1, 2)},
+           "source": src, "seconds": {"download": round(t1 - t0, 2), "process": round(time.time() - t1, 2)},
            "missingCells": int((q == MISS).sum())}
     return rec, g, geo
 
@@ -225,19 +227,22 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
     if grid: grid = {k: v for k, v in grid.items() if k != "projection"}   # as grid_of() builds it, for the same-grid check
     fields = {f: {"hours": dict(man.get("fields", {}).get(f, {}).get("hours", {}))} for f in FIELDS}
     carried = processed = 0
+    rows_of = run_rows(cycle)
     os.makedirs(out_dir, exist_ok=True)
     for f in FIELDS:
         todo = []
         for fh in hours:
             rec = fields[f]["hours"].get(str(fh))
             if rec:
-                carry_hour(site_url, rel, f, fh, rec, out_dir); carried += 1
+                if "notApplicable" not in rec: carry_hour(site_url, rel, f, fh, rec, out_dir)
+                carried += 1
             else:
                 todo.append(fh)
-        if todo and grid is None:   # the first hour fixes and checks the grid for the run
-            rec, grid, geo = process_hour(cycle, todo[0], f, out_dir); fields[f]["hours"][str(todo[0])] = rec; processed += 1; todo = todo[1:]
+        while todo and grid is None:   # the first hour that has this field fixes and checks the grid for the run
+            rec, grid, g0 = process_hour(cycle, todo[0], f, out_dir, None, rows_of); fields[f]["hours"][str(todo[0])] = rec; processed += 1; todo = todo[1:]
+            geo = g0 or geo
         def work(fh):
-            try: return fh, process_hour(cycle, fh, f, out_dir, grid)[0], None
+            try: return fh, process_hour(cycle, fh, f, out_dir, grid, rows_of)[0], None
             except Exception as e: return fh, None, str(e)[:200]
         with cf.ThreadPoolExecutor(workers) as ex:
             for fh, rec, err in ex.map(work, todo):
@@ -256,7 +261,7 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
         "tile": TILE, "levels": levels, "layout": "packed" if PACK else "tiles",
         **({"packOrder": "levels from coarsest to native; within a level, tile rows from south (ty=0) to north, tiles west to east; each tile a separate gzip member"} if PACK else {}),
         "encoding": "gzip of [low bytes][high bytes] of zigzag-coded int16 row differences (mod 2^16), row-major per tile; L0 value = stored * scale, L1/L2 value = stored * scale * displayStep; -32768 = missing",
-        "fields": {f: {**{k: v for k, v in FIELDS[f].items() if k not in ("idx", "classify")}, "missingSentinel": MISS, "hours": fields[f]["hours"]} for f in FIELDS},
+        "fields": {f: {**{k: v for k, v in FIELDS[f].items() if k != "read"}, "missingSentinel": MISS, "hours": fields[f]["hours"]} for f in FIELDS},
         "updatedAt": dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "attribution": "NOAA/NCEP HRRR via NOAA Open Data Dissemination (AWS). Rendered by Forecast Ops. Model guidance, not an official forecast.",
     }
@@ -269,7 +274,7 @@ def summary(man, rel):
     by = {L: 0 for L in ("L0", "L1", "L2")}
     for f in man["fields"].values():
         for rec in f["hours"].values():
-            for L, b in rec["bytes"].items(): by[L] += b
+            for L, b in rec.get("bytes", {}).items(): by[L] += b
     return {"id": man["cycle"][:13].replace("-", "").replace("T", ""), "cycle": man["cycle"], "role": man["role"], "status": man["status"], "hoursExpected": man["hoursExpected"],
             "hours": man["hours"], "path": rel, "fields": sorted(man["fields"]), "bytesByLevel": by, "updatedAt": man["updatedAt"]}
 
