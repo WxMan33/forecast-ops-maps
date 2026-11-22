@@ -57,7 +57,7 @@ ok(conus.plan({c(19): {1: "x"}}, now) == [], "a cycle without f00 is not offered
 
 # 5. a run published earlier keeps growing: its hours are carried and new hours are added on the same grid
 import tempfile  # noqa: E402
-G = {"gridType": "lambert", "Nx": 1799, "Ny": 1059, "DxInMetres": 3000.0, "i0": 0, "j0": 0, "nx": 1799, "ny": 1059, "x0": -2.7e6, "y0": -1.6e6}
+G = {"gridType": "lambert", "Nx": 1799, "Ny": 1059, "LaDInDegrees": 38.5, "LoVInDegrees": 262.5, "Latin1InDegrees": 38.5, "Latin2InDegrees": 38.5, "latitudeOfFirstGridPointInDegrees": 21.138123, "longitudeOfFirstGridPointInDegrees": 237.280472, "DxInMetres": 3000.0, "DyInMetres": 3000.0, "iScansNegatively": 0, "jScansPositively": 1, "jPointsAreConsecutive": 0, "radius": 6371229, "i0": 0, "j0": 0, "nx": 1799, "ny": 1059, "x0": -2697520.1425219304, "y0": -1587306.1525566624}   # the real HRRR CONUS grid keys (label points need the projection)
 calls = {"carry": [], "proc": []}
 real_carry, real_proc = conus.carry_hour, conus.process_hour
 conus.carry_hour = lambda site, rel, f, fh, rec, out: calls["carry"].append(fh)

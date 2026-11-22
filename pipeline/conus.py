@@ -197,7 +197,9 @@ def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
                 with open(os.path.join(d, name), "wb") as fp: fp.write(b)
                 files[name] = [len(b), hashlib.sha256(b).hexdigest()[:16]]
         sizes = {n: v[0] for n, v in files.items()}
-    rec = {**({"pack": pack} if pack else {"files": files}), "bytes": {f"L{L}": sum(v for n, v in sizes.items() if n.startswith(f"L{L}_")) for L in LEVELS},
+    pb = points_blob(q, grid or g); os.makedirs(os.path.join(out_dir, field), exist_ok=True)
+    with open(os.path.join(out_dir, field, f"p{fh:02d}.bin.gz"), "wb") as fp: fp.write(pb)
+    rec = {**({"pack": pack} if pack else {"files": files}), "points": [len(pb), hashlib.sha256(pb).hexdigest()[:16]], "bytes": {f"L{L}": sum(v for n, v in sizes.items() if n.startswith(f"L{L}_")) for L in LEVELS},
            "source": src, "seconds": {"download": round(t1 - t0, 2), "process": round(time.time() - t1, 2)},
            "missingCells": int((q == MISS).sum())}
     return rec, g, geo
@@ -220,7 +222,54 @@ def fetch_carry(site_url, rel, name, size, check):
 CARRY_STATS = {"local": 0, "http": 0}
 
 
+# ---- label points: exact native values for the viewer's Values overlay (cities + a regular grid), one small file per field-hour
+LATTICE = 16   # every 16th native cell (48 km), offset by half a step
+PLACES = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_places.json"), encoding="utf-8"))["places"]
+
+
+def label_points(grid):
+    """[(i, j)] for the places inside the grid, then the lattice row by row; plus the manifest description."""
+    fwd = hrrr.lcc(grid); pl = []
+    for name, lat, lon, pop in PLACES:
+        x, y = fwd(lat, lon); i = int(round((float(x) - grid["x0"]) / grid["DxInMetres"])); j = int(round((float(y) - grid["y0"]) / grid["DyInMetres"]))
+        if 0 <= i < grid["nx"] and 0 <= j < grid["ny"]: pl.append([name, lat, lon, pop, i, j])
+    i0 = j0 = LATTICE // 2; nx = (grid["nx"] - 1 - i0) // LATTICE + 1; ny = (grid["ny"] - 1 - j0) // LATTICE + 1
+    ij = [(p[4], p[5]) for p in pl] + [(i0 + LATTICE * a, j0 + LATTICE * b) for b in range(ny) for a in range(nx)]
+    return ij, {"version": 1, "places": pl, "lattice": {"every": LATTICE, "i0": i0, "j0": j0, "nx": nx, "ny": ny},
+                "encoding": "gzip of int16 little-endian values at L0 scale (value = stored * scale; -32768 = missing): places in order, then the lattice row by row (south to north, west to east)"}
+
+
+def points_blob(q, grid):
+    ij, _ = label_points(grid)
+    I = np.array([a for a, _ in ij]); J = np.array([b for _, b in ij])
+    return gzip.compress(q[J, I].astype("<i2").tobytes(), 6, mtime=0)
+
+
+def points_from_tiles(out_dir, field, fh, rec, grid, levels):
+    """Label points for an hour published before points existed: read from its own native (L0) tiles, which hold the
+    stored values exactly (the same numbers points_blob would have written)."""
+    ij, _ = label_points(grid); lv0 = next(l for l in levels if l["level"] == 0); vals = []
+    cache = {}
+    def tile(tx, ty):
+        if (tx, ty) not in cache:
+            ny = min(TILE, lv0["ny"] - ty * TILE); nx = min(TILE, lv0["nx"] - tx * TILE)
+            if "pack" in rec:
+                lens = rec["pack"]["lengths"]; names = [n for L in sorted(LEVELS, reverse=True) for n, _ in tiles_for(np.zeros((grid["ny"], grid["nx"]), np.int16), L, "corner cell", 1)]
+                k = names.index(f"L0_{tx}_{ty}.bin.gz"); off = sum(lens[:k]); blob = open(os.path.join(out_dir, rec["pack"]["file"]), "rb").read()[off:off + lens[k]]
+            else:
+                blob = open(os.path.join(out_dir, field, f"f{fh:02d}", f"L0_{tx}_{ty}.bin.gz"), "rb").read()
+            cache[(tx, ty)] = decode_tile(blob, ny, nx)
+        return cache[(tx, ty)]
+    for i, j in ij: vals.append(tile(i // TILE, j // TILE)[j % TILE, i % TILE])
+    return gzip.compress(np.array(vals, "<i2").tobytes(), 6, mtime=0)
+
+
 def carry_hour(site_url, rel, field, fh, rec, out_dir):
+    if "points" in rec:
+        n, sha = rec["points"]; name = f"{field}/p{fh:02d}.bin.gz"
+        b = fetch_carry(site_url, rel, name, n, lambda x: hashlib.sha256(x).hexdigest()[:16] == sha)
+        os.makedirs(os.path.join(out_dir, field), exist_ok=True)
+        with open(os.path.join(out_dir, name), "wb") as fp: fp.write(b)
     if "pack" in rec:
         pk = rec["pack"]; b = fetch_carry(site_url, rel, pk["file"], pk["bytes"], lambda x: hashlib.sha256(x).hexdigest() == pk["sha256"])
         if len(b) != pk["bytes"] or hashlib.sha256(b).hexdigest() != pk["sha256"]: raise RuntimeError(f"hash mismatch for {rel}/{pk['file']}")
@@ -251,7 +300,18 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
         for fh in hours:
             rec = fields[f]["hours"].get(str(fh))
             if rec:
-                if "notApplicable" not in rec: carry_hour(site_url, rel, f, fh, rec, out_dir)
+                if "notApplicable" not in rec:
+                    carry_hour(site_url, rel, f, fh, rec, out_dir)
+                    if "points" not in rec and grid:   # published before the Values overlay: add its label points from its own tiles
+                        lv = [{"level": L, **dict(zip(("nx", "ny"), level_grid(grid["nx"], grid["ny"], L)))} for L in LEVELS]
+                        try:
+                            pb = points_from_tiles(out_dir, f, fh, rec, grid, lv)
+                        except (FileNotFoundError, ValueError) as e:   # no Values labels for this hour rather than a failed run
+                            log(f"  {cycle:%Y%m%d%H} f{fh:02d} {f}: label points not derived ({str(e)[:80]})"); pb = None
+                        if pb:
+                            os.makedirs(os.path.join(out_dir, f), exist_ok=True)
+                            with open(os.path.join(out_dir, f, f"p{fh:02d}.bin.gz"), "wb") as fp: fp.write(pb)
+                            rec["points"] = [len(pb), hashlib.sha256(pb).hexdigest()[:16]]
                 carried += 1
             else:
                 todo.append(fh)
@@ -274,7 +334,7 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
         "role": role, "hoursExpected": n, "status": "complete" if complete and set(range(n + 1)) <= set(have) else ("final with gaps" if complete else "in progress"),
         "hours": have, "valid": {str(h): (cycle + dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in have},
         "noaaPostedAt": {str(h): posted[h] for h in have if h in posted},
-        "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo,
+        "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo, "points": label_points(grid)[1],
         "tile": TILE, "levels": levels, "layout": "packed" if PACK else "tiles",
         **({"packOrder": "levels from coarsest to native; within a level, tile rows from south (ty=0) to north, tiles west to east; each tile a separate gzip member"} if PACK else {}),
         "encoding": "gzip of [low bytes][high bytes] of zigzag-coded int16 row differences (mod 2^16), row-major per tile; L0 value = stored * scale, L1/L2 value = stored * scale * displayStep; -32768 = missing",

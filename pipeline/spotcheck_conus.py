@@ -47,6 +47,12 @@ def main():
         if "notApplicable" in rec: out.append({"field": f, "status": "not applicable", "why": rec["notApplicable"]}); continue
         k, v, src = spec["read"](rows_of(a.fh)[0], rows_of(a.fh)[1], a.fh, rows_of)
         q = FX.encode(f, v)
+        if "points" in rec:   # every label value of the Values overlay equals the GRIB cell it names
+            import gzip as _gz
+            ij, _d = conus.label_points(grid)
+            got = np.frombuffer(_gz.decompress(open(os.path.join(a.site, rel, f, f"p{a.fh:02d}.bin.gz"), "rb").read()), "<i2")
+            want = np.array([q[j, i] for i, j in ij], np.int16); nbad = int((got != want).sum()) if got.size == want.size else -1
+            out.append({"field": f, "point": f"label points ({got.size}: {len(_d['places'])} places + {_d['lattice']['nx']}x{_d['lattice']['ny']} grid)", "match": nbad == 0, "grib": None, "shown": None, "units": "", "L1": None, "L2": None, "labelPointsWrong": nbad}); bad += nbad != 0
         pts = [(name, *cell(grid, lat, lon)) for name, lat, lon in POINTS]
         fin = np.isfinite(v) & (np.nan_to_num(v) > 0)
         if fin.any():   # the field's own maximum and three random non-zero cells, so wet and snowy cells are checked too

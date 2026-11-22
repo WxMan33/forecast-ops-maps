@@ -64,6 +64,28 @@ def read_t2m(url, rows, fh, rows_of):
     return k, (v - 273.15) * 9 / 5 + 32, [s]
 
 
+def read_d2m(url, rows, fh, rows_of):
+    k, v, s = _get(url, rows, "DPT", "2 m above ground", f"{fh} hour fcst" if fh else "anl",
+                   lambda k: _param(k, 0, 0, 6) and k["typeOfLevel"] == "heightAboveGround" and k["level"] == 2 and _instant(k, fh) and k["units"] == "K", fh)
+    return k, (v - 273.15) * 9 / 5 + 32, [s]
+
+
+MPH_PER_MS = 2.2369362920544
+
+
+def read_gust(url, rows, fh, rows_of):
+    k, v, s = _get(url, rows, "GUST", "surface", f"{fh} hour fcst" if fh else "anl",
+                   lambda k: _param(k, 0, 2, 22) and k["typeOfLevel"] == "surface" and _instant(k, fh) and k["units"] == "m s**-1", fh)
+    return k, np.where(v >= 0, v * MPH_PER_MS, np.nan), [s]
+
+
+def read_frzr_run(url, rows, fh, rows_of):
+    if fh < 1: raise NotApplicable("no accumulation at the analysis hour")
+    k, v, s = _get(url, rows, "FRZR", "surface", _step_acc(0, fh),
+                   lambda k: _param(k, 0, 1, 225) and k["typeOfLevel"] == "surface" and _accum(k, 0, fh) and k["units"] == "kg m**-2", fh)
+    return k, np.where(v >= 0, v / MM_PER_IN, np.nan), [s]
+
+
 def read_refc(url, rows, fh, rows_of):
     k, v, s = _get(url, rows, "REFC", "entire atmosphere", f"{fh} hour fcst" if fh else "anl",
                    lambda k: _param(k, 0, 16, 196) and k["typeOfLevel"] == "atmosphere" and _instant(k, fh) and k["units"] == "dB", fh)
@@ -153,6 +175,16 @@ FIELDS = {
     "t2m": spec("2-m temperature", "degF", 0.1, 5, "corner cell", read_t2m,
                 "NOAA HRRR wrfsfcfNN.grib2, TMP 2 m above ground (GRIB shortName 2t, heightAboveGround 2, instant, K)",
                 "direct: K converted to degF, stored to 0.1 degF; L1/L2 display levels rounded to 0.5 degF"),
+    "d2m": spec("2-m dew point", "degF", 0.1, 5, "corner cell", read_d2m,
+                "NOAA HRRR wrfsfcfNN.grib2, DPT 2 m above ground (GRIB 0/0/6, heightAboveGround 2, instant, K)",
+                "direct: K converted to degF, stored to 0.1 degF; L1/L2 rounded to 0.5 degF"),
+    "gust": spec("Surface wind gust", "mph", 0.1, 10, "block max", read_gust,
+                 "NOAA HRRR wrfsfcfNN.grib2, GUST surface (GRIB 0/2/22, instant, m s-1)",
+                 "direct: m/s converted to mph, stored to 0.1 mph; L1/L2 block maximum to 1 mph; HRRR's instantaneous gust diagnostic at the valid time, not an hourly maximum"),
+    "frzr_run": spec("Freezing rain since run start", "in", 0.001, 10, "block max", read_frzr_run,
+                     "NOAA HRRR wrfsfcfNN.grib2, FRZR surface 0-N hour accumulation (GRIB 0/1/225, NCEP local 'Freezing Rain', accum, kg m-2)",
+                     "direct: liquid equivalent of freezing rain from the run start, mm converted to inches; not ice accretion on surfaces (no ratio applied); L1/L2 block maximum to 0.01 in",
+                     window="run start to valid time", firstHour=1, note="Liquid equivalent of freezing rain, not ice thickness on surfaces."),
     "refc": spec("Simulated composite reflectivity", "dBZ", 0.1, 10, "block max", read_refc,
                  "NOAA HRRR wrfsfcfNN.grib2, REFC entire atmosphere (GRIB 0/16/196, instant, dB)",
                  "direct: model-simulated column-maximum reflectivity, stored to 0.1 dBZ; L1/L2 the block maximum to 1 dBZ",
