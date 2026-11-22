@@ -203,9 +203,26 @@ def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
     return rec, g, geo
 
 
+PREV = None   # --prev DIR: the previous build's site (restored from the Actions cache); hours are copied from it when their hashes match
+
+
+def fetch_carry(site_url, rel, name, size, check):
+    """One already-published file: from the previous build's local copy when it matches, else from the live site."""
+    if PREV:
+        lp = os.path.join(PREV, rel, name)
+        if os.path.exists(lp) and os.path.getsize(lp) == size:
+            with open(lp, "rb") as fp: b = fp.read()
+            if check(b): CARRY_STATS["local"] += 1; return b
+    CARRY_STATS["http"] += 1
+    return hrrr.http(f"{site_url}/{rel}/{name}")
+
+
+CARRY_STATS = {"local": 0, "http": 0}
+
+
 def carry_hour(site_url, rel, field, fh, rec, out_dir):
     if "pack" in rec:
-        pk = rec["pack"]; b = hrrr.http(f"{site_url}/{rel}/{pk['file']}")
+        pk = rec["pack"]; b = fetch_carry(site_url, rel, pk["file"], pk["bytes"], lambda x: hashlib.sha256(x).hexdigest() == pk["sha256"])
         if len(b) != pk["bytes"] or hashlib.sha256(b).hexdigest() != pk["sha256"]: raise RuntimeError(f"hash mismatch for {rel}/{pk['file']}")
         os.makedirs(os.path.join(out_dir, field), exist_ok=True)
         with open(os.path.join(out_dir, pk["file"]), "wb") as fp: fp.write(b)
@@ -213,7 +230,7 @@ def carry_hour(site_url, rel, field, fh, rec, out_dir):
     d = os.path.join(out_dir, field, f"f{fh:02d}"); os.makedirs(d, exist_ok=True)
     def one(item):
         name, (n, sha) = item
-        b = hrrr.http(f"{site_url}/{rel}/{field}/f{fh:02d}/{name}")
+        b = fetch_carry(site_url, rel, f"{field}/f{fh:02d}/{name}", n, lambda x: hashlib.sha256(x).hexdigest()[:16] == sha)
         if len(b) != n or hashlib.sha256(b).hexdigest()[:16] != sha: raise RuntimeError(f"hash mismatch for {rel}/{field}/f{fh:02d}/{name}")
         with open(os.path.join(d, name), "wb") as fp: fp.write(b)
     with cf.ThreadPoolExecutor(8) as ex: list(ex.map(one, rec["files"].items()))
@@ -287,9 +304,11 @@ def main():
     ap.add_argument("--carry-only", action="store_true", help="republish the live CONUS data unchanged")
     ap.add_argument("--max-hours", type=int, default=None, help="limit hours per run (local tests)")
     ap.add_argument("--changed-output", default=None)
+    ap.add_argument("--prev", default=None, help="previous build's site dir (Actions cache): carry hours from it when hashes match")
     ap.add_argument("--pack", action="store_true", help="one packed file per field-hour (object storage + HTTP range requests)")
     a = ap.parse_args()
-    global PACK, PRODUCT
+    global PACK, PRODUCT, PREV
+    PREV = a.prev if a.prev and os.path.isdir(a.prev) else None
     if a.pack: PACK, PRODUCT = True, "conus-v1-packed"
     now = dt.datetime.fromisoformat(a.now).replace(tzinfo=UTC) if a.now else dt.datetime.now(UTC)
     root = os.path.join(a.site, "data", "conus")
@@ -328,7 +347,7 @@ def main():
     if not runs: raise SystemExit("nothing publishable: " + json.dumps(failures))
     index = {"schema": 1, "product": PRODUCT, "model": "HRRR", "generatedAt": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "runs": runs, "failures": failures,
              "retention": "newest cycle (published hour by hour as NOAA posts it), newest complete run, newest complete 48-h run (00/06/12/18Z)",
-             "build": {"seconds": round(time.time() - t0, 1), "hoursProcessed": processed}}
+             "build": {"seconds": round(time.time() - t0, 1), "hoursProcessed": processed, "filesCarried": dict(CARRY_STATS)}}
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, "index.json"), "w") as fp: json.dump(index, fp, indent=1)
     changed = processed > 0 or sorted((r["id"], r["role"]) for r in runs) != sorted((r["id"], r["role"]) for r in prev.get("runs", []))

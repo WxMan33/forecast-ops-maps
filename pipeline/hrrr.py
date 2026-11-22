@@ -58,12 +58,16 @@ FIELDS = {
 def http(url, rng=None, tries=4, timeout=60):
     h = dict(UA)
     if rng: h["Range"] = f"bytes={rng[0]}-{rng[1]}" if rng[1] is not None else f"bytes={rng[0]}-"
-    for k in range(tries):
+    for k in range(max(tries, 6)):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             if e.code in (403, 404): raise
+            if e.code in (429, 503):   # rate limited / busy: wait as asked (capped), longer each time, and allow more tries
+                if k >= max(tries, 6) - 1: raise
+                ra = e.headers.get("Retry-After") if e.headers else None
+                time.sleep(min(60, float(ra)) if ra and ra.isdigit() else min(60, 5 * 2 ** k)); continue
             if k == tries - 1: raise
         except Exception:
             if k == tries - 1: raise

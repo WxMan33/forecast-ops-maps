@@ -109,4 +109,20 @@ ok(FX._step_acc(0, 24) == ["0-24 hour acc fcst", "0-1 day acc fcst"] and FX._ste
    "run totals at F24/F48 are found under the index's day wording (0-1 day, 0-2 day) as well as hours")
 ok(FX.encode("apcp1h", np.array([[0.0123, np.nan]])).tolist() == [[12, -32768]], "precipitation stored in thousandths of an inch; NaN stays missing")
 
-print(f"ok - {n} CONUS packager checks passed")
+
+# 8. carrying a published hour: the previous build's local copy is used when its hash matches; otherwise the live site
+import hashlib as _h, tempfile as _t  # noqa: E402
+with _t.TemporaryDirectory() as prev:
+    rel, name, good = "data/conus/hrrr/x/conus-v1", "t2m/f01/L0_0_0.bin.gz", b"tile-bytes"
+    os.makedirs(os.path.join(prev, rel, "t2m/f01")); open(os.path.join(prev, rel, name), "wb").write(good)
+    calls = []; real_http = conus.hrrr.http; conus.hrrr.http = lambda url, *a, **k: (calls.append(url), good)[1]
+    try:
+        conus.PREV = prev; conus.CARRY_STATS.update(local=0, http=0)
+        b1 = conus.fetch_carry("http://site", rel, name, len(good), lambda x: _h.sha256(x).hexdigest()[:16] == _h.sha256(good).hexdigest()[:16])
+        open(os.path.join(prev, rel, name), "wb").write(b"tile-BYTES")   # same size, different content
+        b2 = conus.fetch_carry("http://site", rel, name, len(good), lambda x: _h.sha256(x).hexdigest()[:16] == _h.sha256(good).hexdigest()[:16])
+        ok(b1 == good and b2 == good and conus.CARRY_STATS == {"local": 1, "http": 1} and calls == [f"http://site/{rel}/{name}"],
+           f"carry: local copy used when its hash matches, live site when it does not ({conus.CARRY_STATS})")
+    finally:
+        conus.hrrr.http = real_http; conus.PREV = None
+print(f"ok - {n} CONUS packager checks passed (with carry)")
