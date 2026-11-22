@@ -125,4 +125,24 @@ with _t.TemporaryDirectory() as prev:
            f"carry: local copy used when its hash matches, live site when it does not ({conus.CARRY_STATS})")
     finally:
         conus.hrrr.http = real_http; conus.PREV = None
+
+
+# 9. NBM: alternating row scanning is undone (stored rows 1, 3, ... run east to west), and 6-h PoP exists only for windows ending 00/06/12/18Z
+from eccodes import codes_grib_new_from_samples, codes_set, codes_set_values, codes_get_message, codes_new_from_message, codes_release  # noqa: E402
+import nbm, hrrr  # noqa: E402
+def _synthetic(alt):
+    g = codes_grib_new_from_samples("GRIB2"); codes_set(g, "Ni", 4); codes_set(g, "Nj", 3); codes_set(g, "alternativeRowScanning", alt)
+    codes_set_values(g, np.arange(12, dtype=float)); g2 = codes_new_from_message(codes_get_message(g)); codes_release(g)
+    try: return hrrr.grid_values(g2).tolist()
+    finally: codes_release(g2)
+ok(_synthetic(1) == [[0, 1, 2, 3], [7, 6, 5, 4], [8, 9, 10, 11]] and _synthetic(0) == [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]],
+   "alternative row scanning: every second stored row is reversed into west-to-east order; ordinary grids are untouched")
+_c = dt.datetime(2026, 11, 22, 13, tzinfo=dt.timezone.utc); _r = nbm.pop6h_reader(_c); _na = []
+for _fh in (1, 4, 5, 11, 17, 6):
+    try: _r("u", [], _fh, None)
+    except FX.NotApplicable: _na.append(_fh)
+    except Exception: pass   # applicable: it went on to look for the message in the (empty) index
+ok(_na == [1, 4, 5, 6], f"NBM 6-h PoP from a 13Z run: F11 and F17 (windows ending 00Z, 06Z) applicable; F05 would start before the run, as in the live 13Z index ({_na})")
+ok(set(nbm.FIELDS) == {"t2m", "pop1h", "pop6h"} and all(f["attribution"].startswith("NOAA/NWS National Blend") and "no copyright" in f["terms"] for f in nbm.FIELDS.values()),
+   "NBM fields carry NBM attribution and terms")
 print(f"ok - {n} CONUS packager checks passed (with carry)")

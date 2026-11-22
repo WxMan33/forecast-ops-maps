@@ -123,7 +123,7 @@ def idx_rows(url):
     out = []
     for i, r in enumerate(rows):
         s = int(r[1]); e = int(rows[i + 1][1]) - 1 if i + 1 < len(rows) else None
-        out.append({"n": int(r[0]), "start": s, "end": e, "var": r[3], "level": r[4], "step": r[5]})
+        out.append({"n": int(r[0]), "start": s, "end": e, "var": r[3], "level": r[4], "step": r[5], "extra": ":".join(r[6:]).strip(":")})   # extra: NBM's "prob >0.254...", "ens std dev"; "" for HRRR
     return out
 
 
@@ -147,7 +147,7 @@ def decode(buf):
                                           "Latin2InDegrees", "latitudeOfFirstGridPointInDegrees", "longitudeOfFirstGridPointInDegrees",
                                           "DxInMetres", "DyInMetres", "iScansNegatively", "jScansPositively", "jPointsAreConsecutive", "radius")}
         k["uvRelativeToGrid"] = codes_get(g, "uvRelativeToGrid")
-        v = codes_get_values(g).reshape(k["Ny"], k["Nx"])
+        v = grid_values(g)
         if codes_get(g, "numberOfMissing"):
             v[v == codes_get(g, "missingValue")] = np.nan
         return k, v
@@ -211,6 +211,19 @@ def crop_window(proj):
     return {"i0": i0, "j0": j0, "nx": i1 - i0 + 1, "ny": j1 - j0 + 1, "x0": float(x0), "y0": float(y0)}
 
 
+def grid_values(g):
+    """The message's values as [Ny, Nx] in geographic order (row j, column i west to east). With alternative row scanning
+    (GRIB flag; NBM sets it, HRRR does not) every second stored row runs the other way, and eccodes returns the values in
+    stored order, so those rows are reversed back here. eccodes' own nearest-point lookup and lat/lon arrays already
+    account for it, which is what the checkpoints below compare against."""
+    from eccodes import codes_get, codes_get_values
+    v = codes_get_values(g).reshape(codes_get(g, "Ny"), codes_get(g, "Nx"))
+    try: alt = codes_get(g, "alternativeRowScanning")
+    except Exception: alt = 0
+    if alt: v = v.copy(); v[1::2] = v[1::2, ::-1]
+    return v
+
+
 def check_georef(buf, proj, win):
     """Projected cell centres must reproduce GRIB's own latitudes/longitudes for every cropped cell."""
     from eccodes import codes_new_from_message, codes_get_array, codes_release
@@ -235,7 +248,7 @@ def checkpoints(buf, win):
     from eccodes import codes_new_from_message, codes_grib_find_nearest, codes_get_values, codes_get, codes_release
     g = codes_new_from_message(buf)
     try:
-        full = codes_get_values(g).reshape(codes_get(g, "Ny"), codes_get(g, "Nx")); out = []
+        full = grid_values(g); out = []
         for name, la, lo in CHECKPOINTS:
             nb = codes_grib_find_nearest(g, la, lo)[0]
             j, i = divmod(int(nb["index"]), codes_get(g, "Nx"))

@@ -1,4 +1,4 @@
-# HRRR full-CONUS product inventory (Maps beta)
+# Full-CONUS model product inventory (Maps beta: HRRR and NBM)
 
 Every product on the CONUS maps records **source**, **derivation**, **attribution** and **redistribution terms** (also written into each run manifest by `pipeline/conus.py`). Status:
 
@@ -113,8 +113,27 @@ Upstream dataset for every field below: **NOAA/NCEP HRRR CONUS 3 km**, `wrfsfcfN
 | Precipitation since run start (`apcp_run`) | APCP surface 0/1/8, accum 0–N h, kg m⁻² | mm → in; F00 not applicable | yes | yes | yes | **ready** |
 | Snowfall since run start, HRRR (`asnow_run`) | ASNOW surface 0/1/29 (NCEP local "Total Snowfall"; eccodes names it "unknown", identity checked by the number triple), accum 0–N h, m | m → in; HRRR's variable-density snow, not 10:1 | yes | yes | yes | **ready** |
 | 1-h snowfall, HRRR (`asnow1h`) | ASNOW 0–N and 0–(N−1) of the same run (HRRR publishes no hourly ASNOW) | difference; drops ≤ 0.05 in (packing noise) set to 0, larger ones fail the hour; labelled as derived | yes | yes | yes | **ready** |
+| 2-m dew point (`d2m`) | DPT 2 m above ground, 0/0/6, instant, K | K → °F | yes | yes | yes | **ready** (22 Nov) |
+| Surface wind gust (`gust`) | GUST surface, 0/2/22, instant, m s⁻¹ | m/s → mph; labelled as HRRR's instantaneous gust at the valid time, not an hourly maximum | yes | yes | yes | **ready** (22 Nov) |
+| Freezing rain since run start (`frzr_run`) | FRZR surface, 0/1/225 (NCEP local "Freezing Rain"), accum 0–N h, kg m⁻² | mm → in liquid equivalent; labelled "not ice thickness on surfaces"; F00 not applicable | yes | yes | yes | **ready** (22 Nov) |
+
+**Values overlay (label points, 22 Nov).** Each field-hour also publishes `pNN.bin.gz`: the stored int16 values at 376 Natural Earth places (those inside the grid) plus every 16th native cell (HRRR: 112 × 66 = 7,392 cells, 48 km apart; NBM: 147 × 100, 40 km apart), described in the manifest's `points` block. The viewer writes these numbers on the map (cities at national zoom, towns plus a staggered sample of grid points zoomed in; dry zeros and missing cells left blank) and they go into the PNG when Values is on. They are the same stored values as the L0 tiles, and the CI spot check compares every one of them with the GRIB (7,719 per HRRR field-hour, 15,033 per NBM field-hour). Place names come from Natural Earth (public domain).
 
 Verification of identity and units (live 16Z and 18Z 21 Nov 2026 runs): every reader rejects a message whose discipline/category/number, level type, statistical processing, step window or units differ (the first draft named the type flags 0/1/192–195 and was rejected by this check before anything was published). ASNOW's metre units were confirmed against the same run's new snow water equivalent: median snow-to-liquid ratio 11.9:1 (10th–90th percentile 6.9–15.4) over 4,528 cells with > 2 mm of new liquid. Accumulation windows: at F24 and F48 HRRR's .idx names the run total '0-1 day acc fcst' / '0-2 day acc fcst'; both wordings are looked up and the GRIB step keys decide (the first preview build missed those two hours and showed them as missing until this was fixed). 1-h and run-total APCP agree: run total(N) − run total(N−1) equals the 1-h field within 0.0004 in at F06, F25 and F48 of the 12Z 21 Nov run (108,000–174,000 wet cells). Every CI build compares the built tiles with the GRIB grid at 21 airports, each field's maximum and three random non-zero cells, on all three zoom levels (`pipeline/spotcheck_conus.py`), and republishes the previous data if any cell differs.
+
+## NBM (National Blend of Models), 22 Nov 2026
+
+Upstream dataset: **NOAA/NWS National Blend of Models v4.x, core CONUS 2.5 km**, `blend.tHHz.core.fFFF.co.grib2`, bucket `noaa-nbm-grib2-pds` (NOAA Open Data Dissemination; AWS Registry of Open Data <https://registry.opendata.aws/noaa-nbm/>). Terms: U.S. Government work, no U.S. copyright; NODD states no restriction on use or redistribution; attribute NOAA/NWS and do not imply endorsement. Attribution used on the map, PNG, comparison page and manifests: **"Data: NOAA/NWS National Blend of Models (NOAA Open Data Dissemination) · Forecast Ops output · Model guidance, not an official forecast · Not endorsed by NOAA"**.
+
+Grid: Lambert conformal (LaD 25°N, LoV 265°E, tangent at 25°N), 2345 × 1597 cells at 2539.7 m, earth radius 6,371,200 m. NBM GRIB uses **alternative row scanning** (every second stored row runs east to west); the decoder reverses those rows (`hrrr.grid_values`). Without that, 17 of 46 test points read the wrong cell (CVG 34 °F instead of 66 °F); the pipeline's nearest-point checkpoint caught it before anything was published, and a synthetic regression test now covers it.
+
+| Field (id) | Exact GRIB source, checked per message | Derivation | Hours | Status |
+|---|---|---|---|---|
+| 2-m temperature (`t2m`) | TMP 2 m above ground, `.idx` qualifier empty, 0/0/0, **template 4.0** (deterministic; the same name/level/step also carries an "ens std dev" message, template 4.2, which is rejected), instant, K | K → °F | F01–F24 hourly | **ready** |
+| 1-h PoP (`pop1h`) | APCP surface, qualifier `prob >0.254:prob fcst 255/255`, 0/1/8, **template 4.9**, probabilityType 1, upper limit 254 × 10⁻³ = 0.254 kg m⁻² (0.01 in), accum (N−1)–N h | none: NBM's own percent (0–100 checked) | F01–F24 hourly | **ready** |
+| 6-h PoP (`pop6h`) | same as 1-h PoP with accum (N−6)–N h | none; NBM posts 6-h windows ending 00/06/12/18Z valid time only (verified in the 12Z and 13Z 22 Nov runs), so other hours are published as not applicable with that reason | windows ending 00/06/12/18Z within F06–F24 | **ready** |
+
+Retention: the two newest NBM runs with F01–F24 posted (hourly cycles), so the cycle comparison works. Size: temperature ≈ 2.1 MB, 1-h PoP ≈ 0.6 MB, 6-h PoP ≈ 0.8 MB per forecast hour; two runs ≈ 152 MB. NBM posts hourly to F36 and 3-hourly beyond; F25+ waits for R2 hosting (GitHub Pages' 1 GB guideline). Verified 22 Nov 2026: every cell checked (21 airports, each field's maximum and random non-zero cells, three levels) and every label point equals the GRIB value (`spotcheck_conus.py --model nbm`, also run in CI before publishing).
 
 ### Everything else drawn with the fields
 
@@ -132,10 +151,10 @@ Verification of identity and units (live 16Z and 18Z 21 Nov 2026 runs): every re
 
 | Item | Why |
 |---|---|
-| Snowfall 10:1 (WEASD × 10), Kuchera snowfall, freezing-rain accumulation | fields not built yet; WEASD is verified (0/1/13, accum, kg m⁻²) |
+| Snowfall 10:1 (WEASD × 10), Kuchera snowfall | fields not built yet; WEASD is verified (0/1/13, accum, kg m⁻²) |
 | Hosting on Cloudflare R2 | pilot blocked: repository settings `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET` (and `R2_PUBLIC_URL`) are not set; R2 storage terms to review with the account |
-| ECMWF IFS/AIFS open data | per the user, ECMWF permits commercial use and redistribution of its open subset with attribution; field list, delivery (latency, resolution) and the exact attribution text to be confirmed before use |
-| NBM, RRFS, GFS | NOAA open data like HRRR; each dataset's registry page and field identities to be checked as above before publishing |
+| ECMWF IFS/AIFS open data | CC BY 4.0, commercial use allowed with attribution (see the next-batch proposal); not built |
+| RRFS, GFS | NOAA open data like HRRR; not built (see the next-batch proposal) |
 
 ## Hosting: measured use and estimated R2 cost
 
@@ -152,11 +171,16 @@ R2 estimate, using Cloudflare's published R2 rates as last known (storage $0.015
 
 Reads served from Cloudflare's cache on a custom domain are not R2 reads, so a cached public endpoint lowers the read line further. GitHub Pages is fine for a preview, but its terms are not meant for a commercial service and it has a 1 GB site guideline, which the expanded scale would exceed.
 
-## After HRRR (scope only; nothing built)
+## Next batch proposal (22 Nov 2026; nothing built)
 
-| Model | Use on shift | Source and terms to confirm | First fields | Notes |
-|---|---|---|---|---|
-| NBM (National Blend of Models) | planning: hourly/3-h blended precip, snow, PoP, wind to day 7+ | NOAA open data (AWS registry `noaa-nbm-grib2-pds`), same NOAA terms as HRRR; confirm the registry page | QPF 1/6 h, snow 6/24 h, PoP, ice accumulation | 2.5 km CONUS grid; percentile snow products are high value for planning |
-| RRFS | high-resolution comparison with HRRR | NOAA open data (AWS `noaa-rrfs-pds`); RRFS is pre-operational: label it and track NOAA's status | same seven fields as HRRR | 3 km; side-by-side or A/B compare with HRRR |
-| GFS | medium range, CONUS and global | NOAA open data (AWS `noaa-gfs-bdp-pds`) | 6-h precip, snow, MSLP, 500 mb heights, 2-m temperature | 0.25° grid; different projection (lat/lon) for the viewer |
-| ECMWF IFS / AIFS open data | medium range comparison | ECMWF open data; per the user, commercial use and redistribution permitted with attribution; confirm the licence text, field list, resolution and delivery latency first | 6-h precip, MSLP, 500 mb heights, 2-m temperature | open subset is 0.25°; snowfall availability to confirm |
+Order by value per unit of work, given what is verified today:
+
+| # | Model | Availability (checked 22 Nov 2026) | Terms for a commercial product | First fields | Work |
+|---|---|---|---|---|---|
+| 1 | **RRFS** (Rapid Refresh Forecast System, NCEP operational) | operational 3 km CONUS file `rrfs.tHHz.2dfld.3km.fFFF.conus.grib2` with `.idx` in `noaa-rrfs-ops-pds` (not the pre-operational `noaa-rrfs-pds`); its `.idx` names match HRRR's (REFC, GUST, TMP/DPT 2 m, APCP 1-h and run, ASNOW, CSNOW…, MXUPHL, CAPE) | NOAA open data, same terms as HRRR; attribute "NOAA/NCEP RRFS" | the ten HRRR fields, then updraft helicity and CAPE | small: the HRRR readers with a new URL and grid check; NWS service change notices gave several implementation dates in 2026, so re-check the status line before calling it operational in the UI |
+| 2 | **GFS** 0.25° | `noaa-gfs-bdp-pds`, `gfs.tHHz.pgrb2.0p25.fFFF` (+ `.idx`, 743 messages at F24) | NOAA open data, same terms | 2-m temperature, 6-h precipitation, MSLP, 500 mb height, snow | medium: regular lat/lon grid, so the pipeline and the viewer need an equirectangular projector beside Lambert conformal, and a CONUS crop |
+| 3 | **ECMWF IFS (and AIFS) open data** | ECMWF opened its full real-time catalogue on 1 Oct 2025; the free open subset is 0.25° (≈ 25 km), with a 9 km extension announced for later in 2026 | **CC BY 4.0**: commercial reuse allowed with attribution (e.g. "Source: ECMWF, CC BY 4.0; modified by Forecast Ops"); high-volume delivery may carry service charges; data obtained earlier under research licences stays non-commercial | 2-m temperature, 6-h precipitation, MSLP, 500 mb height | medium: same lat/lon work as GFS plus ECMWF's own GRIB conventions; confirm the exact attribution wording on ECMWF's licence page before release |
+
+Hosting gate: HRRR (up to ≈ 0.55 GB with three runs) + NBM (≈ 0.15 GB) already uses most of GitHub Pages' 1 GB guideline, so RRFS, GFS, ECMWF and NBM beyond F24 need the R2 pilot (blocked on repository settings) first.
+
+Sources: ECMWF open data announcement <https://www.ecmwf.int/en/about/media-centre/news/2025/ecmwf-makes-its-entire-real-time-catalogue-open-all>; AWS registry for RRFS <https://registry.opendata.aws/noaa-rrfs/>; NWS SCN 26-48 (RRFS/REFS implementation) <https://www.weather.gov/media/notification/pdf_2026/scn26-048_Updated_RRFS_and_REFS_Implementation_aad.pdf>.

@@ -29,9 +29,10 @@ def decode(buf):
     g = codes_new_from_message(buf)
     try:
         k = {n: codes_get(g, n) for n in KEYS + hrrr.GRID_KEYS}
-        try: k["typeOfStatisticalProcessing"] = codes_get(g, "typeOfStatisticalProcessing")
-        except Exception: k["typeOfStatisticalProcessing"] = None
-        v = codes_get_values(g).reshape(k["Ny"], k["Nx"]).astype(np.float64)
+        for n in ("typeOfStatisticalProcessing", "productDefinitionTemplateNumber", "probabilityType", "scaledValueOfUpperLimit", "scaleFactorOfUpperLimit"):
+            try: k[n] = codes_get(g, n)   # the last four identify NBM's deterministic and probability products
+            except Exception: k[n] = None
+        v = hrrr.grid_values(g).astype(np.float64)   # geographic order, also for alternative row scanning (NBM)
         if codes_get(g, "numberOfMissing"): v[v == codes_get(g, "missingValue")] = np.nan
         return k, v
     finally:
@@ -43,15 +44,16 @@ def _accum(k, a, b): return k["stepType"] == "accum" and k["stepUnits"] == 1 and
 def _param(k, d, c, n): return (k["discipline"], k["parameterCategory"], k["parameterNumber"]) == (d, c, n)
 
 
-def _get(url, rows, var, level, step, check, fh):
-    """One message by .idx line, confirmed from its GRIB keys; returns (keys, values, source record)."""
+def _get(url, rows, var, level, step, check, fh, extra=""):
+    """One message by .idx line, confirmed from its GRIB keys; returns (keys, values, source record). `extra` is the .idx
+    qualifier after the step ("" for a plain field; NBM writes e.g. "prob >0.254:prob fcst 255/255" or "ens std dev")."""
     steps = step if isinstance(step, list) else [step]
-    cand = [r for r in rows if r["var"] == var and r["level"] == level and r["step"] in steps]
+    cand = [r for r in rows if r["var"] == var and r["level"] == level and r["step"] in steps and r.get("extra", "") == extra]
     if not cand: raise RuntimeError(f"{var} {level} '{step}' not in the index")
     for r in cand:
         buf = hrrr.http(url, (r["start"], r["end"])); k, v = decode(buf)
         if check(k):
-            return k, v, {"idx": f'{var}:{level}:{step}', "range": [r["start"], r["end"]], "bytes": len(buf), "sha256": hashlib.sha256(buf).hexdigest(),
+            return k, v, {"idx": f'{var}:{level}:{r["step"]}' + (f":{extra}" if extra else ""), "range": [r["start"], r["end"]], "bytes": len(buf), "sha256": hashlib.sha256(buf).hexdigest(),
                           "grib": {x: k[x] for x in ("discipline", "parameterCategory", "parameterNumber", "shortName", "typeOfLevel", "level",
                                                      "stepType", "typeOfStatisticalProcessing", "startStep", "endStep", "units")}}
         raise RuntimeError(f"{var} {step}: GRIB identity does not match ({ {x: k[x] for x in ('discipline', 'parameterCategory', 'parameterNumber', 'typeOfLevel', 'stepType', 'startStep', 'endStep', 'units')} })")
@@ -213,7 +215,7 @@ FIELDS = {
 }
 
 
-def encode(field, vals):
+def encode(field, vals, table=None):
     """Display-unit floats -> int16 at the field's scale; NaN -> missing sentinel."""
-    q = np.round(np.asarray(vals, np.float64) / FIELDS[field]["scale"])
+    q = np.round(np.asarray(vals, np.float64) / (table or FIELDS)[field]["scale"])
     return np.where(np.isfinite(q), np.clip(q, -32767, 32767), hrrr.MISS16).astype("<i2")

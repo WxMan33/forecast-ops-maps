@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      changed: ${{ steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || steps.conus.outputs.conus_changed == 'true' }}
+      changed: ${{ steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || steps.conus.outputs.conus_changed == 'true' || steps.nbm.outputs.nbm_changed == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,6 +48,15 @@ jobs:
             && python pipeline/spotcheck_conus.py _site auto 6 --json _site/data/conus/spotcheck.json \
             || (rm -rf _site/data/conus && python pipeline/conus.py --carry-only --site _site --prev _conus_prev --published "https://wxman33.github.io/forecast-ops-maps") \
             || echo "::warning::CONUS tiles unavailable this run"
+      - name: NBM temperature and PoP tiles (beta; conus-v1) and source-grid spot check
+        id: nbm
+        # After the HRRR step (its fallback replaces data/conus); a failure republishes the previous NBM data unchanged
+        continue-on-error: true
+        run: |
+          python pipeline/nbm.py --site _site --prev _conus_prev --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT" \
+            && python pipeline/spotcheck_conus.py _site auto 6 --model nbm --json _site/data/conus/nbm/spotcheck.json \
+            || (rm -rf _site/data/conus/nbm && python pipeline/nbm.py --carry-only --site _site --prev _conus_prev --published "https://wxman33.github.io/forecast-ops-maps") \
+            || echo "::warning::NBM tiles unavailable this run"
       - name: Keep this CONUS build for the next run
         if: always()
         run: rm -rf _conus_prev && mkdir -p _conus_prev && if [ -d _site/data/conus ]; then cp -r _site/data _conus_prev/ && rm -rf _conus_prev/data/hrrr _conus_prev/data/trends; fi
@@ -67,7 +76,7 @@ jobs:
           node archive/trends.js --site _site --published "https://wxman33.github.io/forecast-ops-maps" --changed-output "$GITHUB_OUTPUT" \
             || node archive/trends.js --carry-only --site _site --published "https://wxman33.github.io/forecast-ops-maps" \
             || echo "::warning::trend archive unavailable this run"
-      - if: steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || steps.conus.outputs.conus_changed == 'true' || github.event_name != 'schedule'
+      - if: steps.build.outputs.changed == 'true' || steps.trends.outputs.trends_changed == 'true' || steps.conus.outputs.conus_changed == 'true' || steps.nbm.outputs.nbm_changed == 'true' || github.event_name != 'schedule'
         uses: actions/upload-pages-artifact@v3
         with: { path: _site }
   deploy:

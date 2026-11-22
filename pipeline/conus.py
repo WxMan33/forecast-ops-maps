@@ -40,6 +40,9 @@ CHECKPOINTS = hrrr.CHECKPOINTS + [("Seattle (SEA)", 47.4502, -122.3088), ("Miami
 
 import fields as FX  # noqa: E402  every field: its GRIB identity checks, units and derivation
 FIELDS = FX.FIELDS
+# the model this process publishes; pipeline/nbm.py swaps these for the National Blend of Models (the tile format is the same)
+MODEL = {"name": "HRRR", "slug": "hrrr", "domain": "CONUS 3 km (full native grid)",
+         "attribution": "NOAA/NCEP HRRR via NOAA Open Data Dissemination (AWS). Rendered by Forecast Ops. Model guidance, not an official forecast."}
 
 
 def available(now):
@@ -147,6 +150,7 @@ def georef(buf, grid):
 
 
 def run_rows(cycle):
+    if MODEL.get("run_rows"): return MODEL["run_rows"](cycle)
     """.idx rows per forecast hour of one run, fetched once and shared by every field (thread-safe enough: idempotent)."""
     cache = {}
     def rows_of(fh):
@@ -173,7 +177,7 @@ def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
     elif g != grid: raise RuntimeError(f"grid changed within run at f{fh:02d}")
     run = dt.datetime.strptime(f"{k['dataDate']}{int(k['dataTime']):04d}", "%Y%m%d%H%M").replace(tzinfo=UTC)
     if run != cycle: raise RuntimeError(f"f{fh:02d} message is from run {run:%Y%m%d%H}")
-    spec = FIELDS[field]; q = FX.encode(field, v)
+    spec = FIELDS[field]; q = FX.encode(field, v, FIELDS)
     src = {"url": url, **srcs[0], **({"also": srcs[1:]} if len(srcs) > 1 else {})}
     files, pack = {}, None
     if PACK:
@@ -330,8 +334,8 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
     levels = [{"level": L, "every": 2 ** L, **dict(zip(("nx", "ny"), level_grid(grid["nx"], grid["ny"], L))),
                "tilesX": (level_grid(grid["nx"], grid["ny"], L)[0] + TILE - 1) // TILE, "tilesY": (level_grid(grid["nx"], grid["ny"], L)[1] + TILE - 1) // TILE} for L in LEVELS]
     out = {
-        "schema": 1, "product": PRODUCT, "model": "HRRR", "domain": "CONUS 3 km (full native grid)", "cycle": cycle.strftime("%Y-%m-%dT%H:00:00Z"),
-        "role": role, "hoursExpected": n, "status": "complete" if complete and set(range(n + 1)) <= set(have) else ("final with gaps" if complete else "in progress"),
+        "schema": 1, "product": PRODUCT, "model": MODEL["name"], "domain": MODEL["domain"], "cycle": cycle.strftime("%Y-%m-%dT%H:00:00Z"),
+        "role": role, "hoursExpected": n, "status": "complete" if complete and set(range(MODEL.get("firstHour", 0), n + 1)) <= set(have) else ("final with gaps" if complete else "in progress"),
         "hours": have, "valid": {str(h): (cycle + dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in have},
         "noaaPostedAt": {str(h): posted[h] for h in have if h in posted},
         "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo, "points": label_points(grid)[1],
@@ -340,10 +344,10 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
         "encoding": "gzip of [low bytes][high bytes] of zigzag-coded int16 row differences (mod 2^16), row-major per tile; L0 value = stored * scale, L1/L2 value = stored * scale * displayStep; -32768 = missing",
         "fields": {f: {**{k: v for k, v in FIELDS[f].items() if k != "read"}, "missingSentinel": MISS, "hours": fields[f]["hours"]} for f in FIELDS},
         "updatedAt": dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "attribution": "NOAA/NCEP HRRR via NOAA Open Data Dissemination (AWS). Rendered by Forecast Ops. Model guidance, not an official forecast.",
+        "attribution": MODEL["attribution"],
     }
     with open(os.path.join(out_dir, "manifest.json"), "w") as fp: json.dump(out, fp, separators=(",", ":"))
-    log(f"{cycle:%Y%m%d%H} {role}: {len(have)}/{n + 1} hours ({out['status']}), {processed} processed, {carried} carried")
+    log(f"{cycle:%Y%m%d%H} {role}: {len(have)}/{n + 1 - MODEL.get('firstHour', 0)} hours ({out['status']}), {processed} processed, {carried} carried")
     return out, processed
 
 
@@ -381,7 +385,8 @@ def main():
         for r in prev.get("runs", []):
             man = json.loads(hrrr.http(f"{a.published}/{r['path']}/manifest.json"))
             for f, spec in man["fields"].items():
-                for fh, rec in spec["hours"].items(): carry_hour(a.published, r["path"], f, int(fh), rec, os.path.join(a.site, r["path"]))
+                for fh, rec in spec["hours"].items():
+                    if "notApplicable" not in rec: carry_hour(a.published, r["path"], f, int(fh), rec, os.path.join(a.site, r["path"]))   # nothing to copy for a not-applicable hour
             with open(os.path.join(a.site, r["path"], "manifest.json"), "w") as fp: json.dump(man, fp, separators=(",", ":"))
             runs.append(r)
         index = {**prev, "runs": runs}

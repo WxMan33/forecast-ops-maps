@@ -2,7 +2,7 @@
 """Source-grid spot check for published CONUS tiles: for each field and checkpoint, the value decoded from the published
 L0 tile must equal the value read straight from the GRIB message (same cell, same conversion), and the coarse levels must
 be the documented corner cell or block maximum, rounded to the display step.
-Usage: python pipeline/spotcheck_conus.py SITE_DIR RUN_ID|auto FH [--json out.json]"""
+Usage: python pipeline/spotcheck_conus.py SITE_DIR RUN_ID|auto FH [--model hrrr|nbm] [--json out.json]"""
 import argparse, json, os, sys
 import numpy as np
 
@@ -28,25 +28,28 @@ def tile_value(site, rel, man, field, fh, level, j, i):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("site"); ap.add_argument("run"); ap.add_argument("fh", type=int); ap.add_argument("--json")
+    ap = argparse.ArgumentParser(); ap.add_argument("site"); ap.add_argument("run"); ap.add_argument("fh", type=int); ap.add_argument("--json"); ap.add_argument("--model", default="hrrr", choices=("hrrr", "nbm"))
     a = ap.parse_args()
     if a.run == "auto":   # the newest run in the built site that has this hour
-        idx = json.load(open(os.path.join(a.site, "data", "conus", "index.json")))
+        idx = json.load(open(os.path.join(a.site, "data", "conus", *(["nbm"] if a.model == "nbm" else []), "index.json")))
         pick = [r for r in idx["runs"] if a.fh in r["hours"]]
         if not pick: print(f"no run with f{a.fh:02d} to check"); return
         a.run = pick[0]["id"]; print(f"checking run {a.run} f{a.fh:02d}")
-    rel = f"data/conus/hrrr/{a.run}/{conus.PRODUCT}"
+    rel = f"data/conus/{a.model}/{a.run}/{conus.PRODUCT}"
     man = json.load(open(os.path.join(a.site, rel, "manifest.json")))
     grid = {k: v for k, v in man["grid"].items() if k != "projection"}
     import datetime as dt
-    cyc = dt.datetime.strptime(a.run, "%Y%m%d%H").replace(tzinfo=dt.timezone.utc); rows_of = conus.run_rows(cyc)
+    cyc = dt.datetime.strptime(a.run, "%Y%m%d%H").replace(tzinfo=dt.timezone.utc)
+    if a.model == "nbm":
+        import nbm; nbm.use_nbm(cyc)
+    rows_of = conus.run_rows(cyc); TABLE = conus.FIELDS
     out, bad = [], 0
-    for f, spec in FX.FIELDS.items():
+    for f, spec in TABLE.items():
         rec = man["fields"][f]["hours"].get(str(a.fh))
         if rec is None: out.append({"field": f, "status": "missing hour"}); continue
         if "notApplicable" in rec: out.append({"field": f, "status": "not applicable", "why": rec["notApplicable"]}); continue
         k, v, src = spec["read"](rows_of(a.fh)[0], rows_of(a.fh)[1], a.fh, rows_of)
-        q = FX.encode(f, v)
+        q = FX.encode(f, v, TABLE)
         if "points" in rec:   # every label value of the Values overlay equals the GRIB cell it names
             import gzip as _gz
             ij, _d = conus.label_points(grid)
