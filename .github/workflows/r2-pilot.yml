@@ -2,9 +2,13 @@
 # Needs, in this repository's Settings → Secrets and variables → Actions:
 #   secrets   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY   (bucket-scoped R2 token: Object Read & Write, that bucket only)
 #   variables R2_ACCOUNT_ID, R2_BUCKET, R2_PUBLIC_URL  (e.g. forecast-ops-conus-pilot, https://pub-….r2.dev)
-# Runs only when started by hand; the GitHub Pages maps are not touched.
-name: R2 pilot (CONUS packed tiles)
+# Runs on the same schedule as the GitHub Pages build (HRRR maps) and can still be started by hand; the GitHub Pages maps
+# are not touched. Hours already uploaded are carried from the previous build (Actions cache, hash-checked), so each run
+# uploads only new hours, manifests and the indexes.
+name: R2 maps (CONUS packed tiles)
 on:
+  schedule:
+    - cron: "12,42 * * * *"   # alongside HRRR maps
   workflow_dispatch:
 permissions:
   contents: read
@@ -24,15 +28,18 @@ jobs:
       - run: python -m pip install -q -r pipeline/requirements.txt boto3==1.35.99
       - name: Self-test
         run: python pipeline/test_conus.py
+      - name: Restore the previous R2 build
+        uses: actions/cache/restore@v4
+        with: { path: _r2_prev, key: "r2-${{ github.run_id }}", restore-keys: "r2-" }
       - name: Build packed HRRR tiles (hours already in the bucket are carried, new hours processed) and check them against the GRIB
         run: |
-          python pipeline/conus.py --pack --site _r2 --published "${R2_PUBLIC_URL%/}"
+          python pipeline/conus.py --pack --site _r2 --prev _r2_prev --published "${R2_PUBLIC_URL%/}"
           python pipeline/spotcheck_conus.py _r2 auto 6
       - name: NBM temperature and PoP through Day 3 (F01-F48 hourly, F51-F72 3-hourly), packed, checked against the GRIB
         # A failed NBM build uploads no NBM index, so the sync keeps the NBM data already in the bucket; HRRR still uploads
         continue-on-error: true
         run: |
-          python pipeline/nbm.py --pack --through 72 --site _r2 --published "${R2_PUBLIC_URL%/}" \
+          python pipeline/nbm.py --pack --through 72 --site _r2 --prev _r2_prev --published "${R2_PUBLIC_URL%/}" \
             && python pipeline/spotcheck_conus.py _r2 auto 6 --model nbm \
             && python pipeline/spotcheck_conus.py _r2 auto 72 --model nbm \
             || { rm -rf _r2/data/conus/nbm; echo "::warning::NBM not built this run; R2 keeps its existing NBM data"; }
@@ -42,3 +49,8 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: python pipeline/r2_sync.py --site _r2 | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep this build for the next run
+        run: rm -rf _r2_prev && mkdir -p _r2_prev && cp -r _r2/data _r2_prev/
+      - name: Save the R2 build cache
+        uses: actions/cache/save@v4
+        with: { path: _r2_prev, key: "r2-${{ github.run_id }}" }
