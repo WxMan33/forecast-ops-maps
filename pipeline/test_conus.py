@@ -162,4 +162,23 @@ with tempfile.TemporaryDirectory() as _site:
     _put("data/conus/nbm/index.json", _j.dumps({"runs": [{"path": "data/conus/nbm/NEW/conus-v1-packed"}]}).encode()); _put("data/conus/nbm/NEW/conus-v1-packed/t2m/f01.pack")
     _u, _d, _k = r2_sync.plan(_site, _existing)
     ok(sorted(_d) == sorted(_existing) and any(u[0] == "data/conus/nbm/index.json" for u in _u), f"R2 sync with an NBM build: prunes the old run of each model and uploads the NBM index ({len(_d)} deleted)")
+# 11. RRFS: its own reflectivity encoding and F00 type, its own labels and credit, run retention, and R2 pruning
+import rrfs  # noqa: E402
+ok(set(rrfs.FIELDS) == {"t2m", "d2m", "gust", "refc", "ptype", "apcp1h", "apcp_run", "asnow1h", "asnow_run"} and "frzr_run" not in rrfs.FIELDS,
+   "RRFS fields: the HRRR set without freezing rain (not in the RRFS 3 km file)")
+ok(all("HRRR" not in (sp["label"] + sp["source"] + sp.get("note", "") + sp["attribution"]) and sp["attribution"] == "NOAA/NCEP RRFS" and "RRFS" in sp["terms"] for sp in rrfs.FIELDS.values()),
+   "RRFS fields name RRFS (not HRRR) in labels, sources, notes and credit")
+ok(rrfs.FIELDS["refc"]["read"] is rrfs.read_refc and rrfs.FIELDS["ptype"]["read"] is rrfs.read_ptype and rrfs.FIELDS["t2m"]["read"] is FX.read_t2m, "RRFS reflectivity and type use RRFS readers; the rest the shared ones")
+_c = lambda h, d=22: dt.datetime(2026, 11, d, h, tzinfo=UTC)
+ok(rrfs.n_hours(_c(18)) == 48 and rrfs.n_hours(_c(21)) == 18 and rrfs.n_hours(_c(18), 84) == 84, "RRFS spans: 00/06/12/18Z to F48 (F84 available), 03/09/15/21Z to F18")
+_k = rrfs.keep([(_c(21), 18, {}), (_c(15), 18, {}), (_c(12), 48, {})])
+ok([c.hour for c, _, _ in _k] == [21, 15, 12], f"RRFS retention: two newest runs plus the newest long run ({[c.hour for c, _, _ in _k]})")
+ok([c.hour for c, _, _ in rrfs.keep([(_c(18), 48, {}), (_c(15), 18, {}), (_c(12), 48, {})])] == [18, 15], "RRFS retention: no extra run when a long run is among the two newest")
+with tempfile.TemporaryDirectory() as _site:
+    def _put(rel, body=b"x"): os.makedirs(os.path.dirname(os.path.join(_site, rel)), exist_ok=True); open(os.path.join(_site, rel), "wb").write(body)
+    _put("data/conus/index.json", _j.dumps({"runs": []}).encode())
+    _ex = {"data/conus/rrfs/OLD/conus-v1-packed/t2m/f01.pack": 1}
+    ok(r2_sync.plan(_site, _ex)[1] == [], "R2 sync without an RRFS build keeps the RRFS data in the bucket")
+    _put("data/conus/rrfs/index.json", _j.dumps({"runs": [{"path": "data/conus/rrfs/NEW/conus-v1-packed"}]}).encode())
+    ok(r2_sync.plan(_site, _ex)[1] == list(_ex), "R2 sync with an RRFS build prunes RRFS runs no longer retained")
 print(f"ok - {n} CONUS packager checks passed (with carry)")

@@ -22,7 +22,7 @@ def plan(site, existing):
     # each model prunes only its own runs, and only when this build carries that model's run list: a model whose build
     # failed (no index here) keeps everything it already has in the bucket
     prunable, retained = [], set()
-    for model, idx in (("hrrr", os.path.join(root, "index.json")), ("nbm", os.path.join(root, "nbm", "index.json"))):
+    for model, idx in (("hrrr", os.path.join(root, "index.json")), ("nbm", os.path.join(root, "nbm", "index.json")), ("rrfs", os.path.join(root, "rrfs", "index.json"))):
         if not os.path.exists(idx): continue
         prunable.append(f"data/conus/{model}/")
         with open(idx) as f:

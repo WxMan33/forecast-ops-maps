@@ -33,20 +33,22 @@ def tile_value(site, rel, man, field, fh, level, j, i):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("site"); ap.add_argument("run"); ap.add_argument("fh", type=int); ap.add_argument("--json"); ap.add_argument("--model", default="hrrr", choices=("hrrr", "nbm"))
+    ap = argparse.ArgumentParser(); ap.add_argument("site"); ap.add_argument("run"); ap.add_argument("fh", type=int); ap.add_argument("--json"); ap.add_argument("--model", default="hrrr", choices=("hrrr", "nbm", "rrfs"))
     a = ap.parse_args()
     if a.run == "auto":   # the newest run in the built site that has this hour
-        idx = json.load(open(os.path.join(a.site, "data", "conus", *(["nbm"] if a.model == "nbm" else []), "index.json")))
+        idx = json.load(open(os.path.join(a.site, "data", "conus", *([a.model] if a.model != "hrrr" else []), "index.json")))
         pick = [r for r in idx["runs"] if a.fh in r["hours"]]
         if not pick: print(f"no run with f{a.fh:02d} to check"); return
         a.run = pick[0]["id"]; print(f"checking run {a.run} f{a.fh:02d}")
-    rel = next((r["path"] for r in json.load(open(os.path.join(a.site, "data", "conus", *(["nbm"] if a.model == "nbm" else []), "index.json")))["runs"] if r["id"] == a.run), f"data/conus/{a.model}/{a.run}/{conus.PRODUCT}")   # tiles or packed
+    rel = next((r["path"] for r in json.load(open(os.path.join(a.site, "data", "conus", *([a.model] if a.model != "hrrr" else []), "index.json")))["runs"] if r["id"] == a.run), f"data/conus/{a.model}/{a.run}/{conus.PRODUCT}")   # tiles or packed
     man = json.load(open(os.path.join(a.site, rel, "manifest.json")))
     grid = {k: v for k, v in man["grid"].items() if k != "projection"}
     import datetime as dt
     cyc = dt.datetime.strptime(a.run, "%Y%m%d%H").replace(tzinfo=dt.timezone.utc)
     if a.model == "nbm":
         import nbm; nbm.use_nbm(cyc)
+    if a.model == "rrfs":
+        import rrfs; rrfs.use_rrfs(cyc, man["hoursExpected"])
     rows_of = conus.run_rows(cyc); TABLE = conus.FIELDS
     out, bad = [], 0
     for f, spec in TABLE.items():

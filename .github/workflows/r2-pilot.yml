@@ -43,6 +43,14 @@ jobs:
             && python pipeline/spotcheck_conus.py _r2 auto 6 --model nbm \
             && python pipeline/spotcheck_conus.py _r2 auto 72 --model nbm \
             || { rm -rf _r2/data/conus/nbm; echo "::warning::NBM not built this run; R2 keeps its existing NBM data"; }
+      - name: RRFS 3 km CONUS (00/06/12/18Z to F48, 03/09/15/21Z to F18), packed, checked against the GRIB
+        # A failed RRFS build uploads no RRFS index, so the sync keeps the RRFS data already in the bucket
+        continue-on-error: true
+        run: |
+          python pipeline/rrfs.py --pack --through 48 --site _r2 --prev _r2_prev --published "${R2_PUBLIC_URL%/}" \
+            && python pipeline/spotcheck_conus.py _r2 auto 0 --model rrfs \
+            && python pipeline/spotcheck_conus.py _r2 auto 6 --model rrfs \
+            || { rm -rf _r2/data/conus/rrfs; echo "::warning::RRFS not built this run; R2 keeps its existing RRFS data"; }
       - name: Upload changes to R2 and remove expired runs
         shell: bash   # -o pipefail: a missing setting or failed upload fails the run (tee alone would hide it)
         env:

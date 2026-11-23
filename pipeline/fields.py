@@ -48,7 +48,8 @@ def _get(url, rows, var, level, step, check, fh, extra=""):
     """One message by .idx line, confirmed from its GRIB keys; returns (keys, values, source record). `extra` is the .idx
     qualifier after the step ("" for a plain field; NBM writes e.g. "prob >0.254:prob fcst 255/255" or "ens std dev")."""
     steps = step if isinstance(step, list) else [step]
-    cand = [r for r in rows if r["var"] == var and r["level"] == level and r["step"] in steps and r.get("extra", "") == extra]
+    levels = level if isinstance(level, (list, tuple)) else [level]   # the same level can be worded differently (RRFS: "... (considered as a single layer)")
+    cand = [r for r in rows if r["var"] == var and r["level"] in levels and r["step"] in steps and r.get("extra", "") == extra]
     if not cand: raise RuntimeError(f"{var} {level} '{step}' not in the index")
     for r in cand:
         buf = hrrr.http(url, (r["start"], r["end"])); k, v = decode(buf)
@@ -89,7 +90,7 @@ def read_frzr_run(url, rows, fh, rows_of):
 
 
 def read_refc(url, rows, fh, rows_of):
-    k, v, s = _get(url, rows, "REFC", "entire atmosphere", f"{fh} hour fcst" if fh else "anl",
+    k, v, s = _get(url, rows, "REFC", ["entire atmosphere", "entire atmosphere (considered as a single layer)"], f"{fh} hour fcst" if fh else "anl",
                    lambda k: _param(k, 0, 16, 196) and k["typeOfLevel"] == "atmosphere" and _instant(k, fh) and k["units"] == "dB", fh)
     return k, v, [s]
 
@@ -151,6 +152,11 @@ PTYPE_CODES = {0: "none", 1: "rain", 2: "snow", 3: "ice pellets", 4: "freezing r
 def read_ptype(url, rows, fh, rows_of):
     """One category per cell from HRRR's four yes/no flags; freezing rain > ice pellets > snow > rain when several are set."""
     if fh < 1: raise NotApplicable("the HRRR analysis hour carries no precipitation-type diagnosis (all four flags are 0 everywhere)")
+    return ptype_flags(url, rows, fh)
+
+
+def ptype_flags(url, rows, fh):
+    """The four categorical flags combined (also at F00, for models whose analysis sets them, e.g. RRFS)."""
     lvl, st = "surface", f"{fh} hour fcst" if fh else "anl"
     flags, srcs, k = {}, [], None
     for var, num, code in (("CRAIN", 33, 1), ("CSNOW", 36, 2), ("CICEP", 35, 3), ("CFRZR", 34, 4)):
