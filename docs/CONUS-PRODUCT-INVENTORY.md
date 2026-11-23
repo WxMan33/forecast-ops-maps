@@ -171,6 +171,20 @@ R2 estimate, using Cloudflare's published R2 rates as last known (storage $0.015
 
 Reads served from Cloudflare's cache on a custom domain are not R2 reads, so a cached public endpoint lowers the read line further. GitHub Pages is fine for a preview, but its terms are not meant for a commercial service and it has a 1 GB site guideline, which the expanded scale would exceed.
 
+## R2 pilot results (22–23 Nov 2026)
+
+Bucket `forecast-ops-conus-pilot`, public at its `r2.dev` address (fine for the pilot; use a custom domain for production, as Cloudflare rate-limits `r2.dev`). CORS: GET/HEAD from the preview origin, `Range` allowed, `Content-Length`/`Content-Range`/`ETag` exposed. Uploaded by the manual workflow only (`r2-pilot.yml`); nothing is scheduled.
+
+| | Result |
+|---|---|
+| Run 2 (HRRR only) | 1,339 objects, 425 MB; 22Z and 18Z complete |
+| Run 3 (HRRR + NBM Day 3) | 557 objects / 331 MB uploaded, 1,336 kept, 0 deleted; bucket 756 MB; HRRR F06 and NBM F06/F72 spot checks: every cell equals the GRIB |
+| Same run on GitHub Pages vs R2 (hosted viewer, desktop and phone) | 68 display tiles byte-identical (4 fields, 2 hours, 3 levels, plus a same-window field); same Values labels, click readout, loop and same-window comparison |
+| Requests / bytes, Cincinnati view, after the loop prefetch | Pages 344 requests, 7.8 MB; R2 149 requests (98 × 206), 8.0 MB |
+| NBM Day 3 from R2 | 56 hours per run (F01–F48 hourly, F51–F72 3-hourly); labels exact at F72; 1-h PoP after F48 says why it is blank; 6-h PoP loop and comparison stop only at 00/06/12/18Z window ends through F69/F72 |
+
+NBM through F72 is ≈ 147 MB per run (two runs ≈ 0.29 GB). GitHub Pages keeps NBM at F01–F24 (1 GB site guideline); Day 3 is on R2 only.
+
 ## Next batch proposal (22 Nov 2026; nothing built)
 
 Order by value per unit of work, given what is verified today:
