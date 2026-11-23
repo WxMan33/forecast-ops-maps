@@ -23,7 +23,12 @@ def tile_value(site, rel, man, field, fh, level, j, i):
     s = 2 ** level; jj, ii = j // s, i // s; ty, tx = jj // conus.TILE, ii // conus.TILE
     name = f"L{level}_{tx}_{ty}.bin.gz"; lv = next(x for x in man["levels"] if x["level"] == level)
     ny = min(conus.TILE, lv["ny"] - ty * conus.TILE); nx = min(conus.TILE, lv["nx"] - tx * conus.TILE)
-    with open(os.path.join(site, rel, field, f"f{fh:02d}", name), "rb") as fp: a = conus.decode_tile(fp.read(), ny, nx)
+    if "pack" in rec:   # packed layout (R2): tiles are gzip members in PACK order (levels coarsest first, rows south to north)
+        names = [n for L in sorted(conus.LEVELS, reverse=True) for n, _ in conus.tiles_for(np.zeros((man["grid"]["ny"], man["grid"]["nx"]), np.int16), L, "corner cell", 1)]
+        k = names.index(name); lens = rec["pack"]["lengths"]; off = sum(lens[:k])
+        with open(os.path.join(site, rel, rec["pack"]["file"]), "rb") as fp: fp.seek(off); a = conus.decode_tile(fp.read(lens[k]), ny, nx)
+    else:
+        with open(os.path.join(site, rel, field, f"f{fh:02d}", name), "rb") as fp: a = conus.decode_tile(fp.read(), ny, nx)
     return int(a[jj - ty * conus.TILE, ii - tx * conus.TILE])
 
 
@@ -35,7 +40,7 @@ def main():
         pick = [r for r in idx["runs"] if a.fh in r["hours"]]
         if not pick: print(f"no run with f{a.fh:02d} to check"); return
         a.run = pick[0]["id"]; print(f"checking run {a.run} f{a.fh:02d}")
-    rel = f"data/conus/{a.model}/{a.run}/{conus.PRODUCT}"
+    rel = next((r["path"] for r in json.load(open(os.path.join(a.site, "data", "conus", *(["nbm"] if a.model == "nbm" else []), "index.json")))["runs"] if r["id"] == a.run), f"data/conus/{a.model}/{a.run}/{conus.PRODUCT}")   # tiles or packed
     man = json.load(open(os.path.join(a.site, rel, "manifest.json")))
     grid = {k: v for k, v in man["grid"].items() if k != "projection"}
     import datetime as dt

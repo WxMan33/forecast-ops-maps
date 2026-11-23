@@ -335,7 +335,7 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
                "tilesX": (level_grid(grid["nx"], grid["ny"], L)[0] + TILE - 1) // TILE, "tilesY": (level_grid(grid["nx"], grid["ny"], L)[1] + TILE - 1) // TILE} for L in LEVELS]
     out = {
         "schema": 1, "product": PRODUCT, "model": MODEL["name"], "domain": MODEL["domain"], "cycle": cycle.strftime("%Y-%m-%dT%H:00:00Z"),
-        "role": role, "hoursExpected": n, "status": "complete" if complete and set(range(MODEL.get("firstHour", 0), n + 1)) <= set(have) else ("final with gaps" if complete else "in progress"),
+        "role": role, "hoursExpected": n, "status": "complete" if complete and (all({str(h) for h in MODEL["expected"]} <= set(fields[f]["hours"]) for f in fields) if MODEL.get("expected") else set(range(MODEL.get("firstHour", 0), n + 1)) <= set(have)) else ("final with gaps" if complete else "in progress"),
         "hours": have, "valid": {str(h): (cycle + dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in have},
         "noaaPostedAt": {str(h): posted[h] for h in have if h in posted},
         "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo, "points": label_points(grid)[1],
@@ -347,7 +347,7 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
         "attribution": MODEL["attribution"],
     }
     with open(os.path.join(out_dir, "manifest.json"), "w") as fp: json.dump(out, fp, separators=(",", ":"))
-    log(f"{cycle:%Y%m%d%H} {role}: {len(have)}/{n + 1 - MODEL.get('firstHour', 0)} hours ({out['status']}), {processed} processed, {carried} carried")
+    log(f"{cycle:%Y%m%d%H} {role}: {len(have)}/{len(MODEL.get('expected') or range(MODEL.get('firstHour', 0), n + 1))} hours ({out['status']}), {processed} processed, {carried} carried")
     return out, processed
 
 

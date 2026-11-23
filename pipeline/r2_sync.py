@@ -19,15 +19,20 @@ def plan(site, existing):
     for d, _, names in os.walk(root):
         for n in names:
             p = os.path.join(d, n); key = os.path.relpath(p, site).replace(os.sep, "/"); files[key] = p
-    retained = set()
-    with open(os.path.join(root, "index.json")) as f:
-        for r in json.load(f)["runs"]: retained.add(r["path"].rstrip("/") + "/")
+    # each model prunes only its own runs, and only when this build carries that model's run list: a model whose build
+    # failed (no index here) keeps everything it already has in the bucket
+    prunable, retained = [], set()
+    for model, idx in (("hrrr", os.path.join(root, "index.json")), ("nbm", os.path.join(root, "nbm", "index.json"))):
+        if not os.path.exists(idx): continue
+        prunable.append(f"data/conus/{model}/")
+        with open(idx) as f:
+            for r in json.load(f)["runs"]: retained.add(r["path"].rstrip("/") + "/")
     uploads, kept = [], []
     for key, p in sorted(files.items()):
         size, mutable = os.path.getsize(p), key.endswith(".json")
         if not mutable and existing.get(key) == size: kept.append(key); continue
         uploads.append((key, p, size, "no-cache" if mutable else "public, max-age=31536000, immutable"))
-    deletes = sorted(k for k in existing if k.startswith("data/conus/hrrr/") and k not in files and not any(k.startswith(r) for r in retained))
+    deletes = sorted(k for k in existing if any(k.startswith(m) for m in prunable) and k not in files and not any(k.startswith(r) for r in retained))
     return uploads, deletes, kept
 
 

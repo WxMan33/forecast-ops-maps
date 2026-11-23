@@ -11,7 +11,7 @@ blend.tHHz.core.fFFF.co.grib2 (+ .idx). Messages are chosen by their .idx line I
             (= 0.01 in), accum over the stated window; values are percent 0-100.
 1-h PoP windows end every hour; 6-h PoP windows end at 00/06/12/18Z valid time (verified 22 Nov 2026 12Z and 13Z runs).
 
-Usage: python pipeline/nbm.py --site SITE [--published URL] [--prev DIR] [--max-hours N] [--carry-only]
+Usage: python pipeline/nbm.py --site SITE [--published URL] [--prev DIR] [--max-hours N] [--through 24|72] [--pack] [--carry-only]
 """
 import argparse, datetime as dt, json, os, re, shutil, sys, time
 import numpy as np
@@ -20,7 +20,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hrrr, conus, fields as FX  # noqa: E402
 
 BUCKET = "https://noaa-nbm-grib2-pds.s3.amazonaws.com"
-HOURS = 24            # F01-F24 for now: 2.5 km temperature is ~2.1 MB per hour in conus-v1 and GitHub Pages caps the site at 1 GB (NBM posts hourly to F36+; extend with R2)
+HOURLY_TO = 48        # NBM core posts every hour through F48, then every 3 hours (F51, F54, ...); 1-h PoP stops at F48
+THROUGH = 24          # last hour published: 24 on GitHub Pages (1 GB site guideline), 72 (Day 3) on R2 (--through 72)
+
+
+def hour_list(through):
+    """The forecast hours NBM core posts up to `through`: hourly to F48, then every 3 hours."""
+    return [h for h in range(1, through + 1) if h <= HOURLY_TO or h % 3 == 0]
 KEEP = 2              # the two newest complete runs (enough for cycle comparison)
 UTC = dt.timezone.utc
 PROB_EXTRA = "prob >0.254:prob fcst 255/255"
@@ -58,7 +64,9 @@ def _pop(url, rows, fh, hours):
     return k, v, [s]
 
 
-def read_pop1h(url, rows, fh, rows_of): return _pop(url, rows, fh, 1)
+def read_pop1h(url, rows, fh, rows_of):
+    if fh > HOURLY_TO: raise FX.NotApplicable("NBM posts 1-h PoP through F48; after that use the 6-h chance")
+    return _pop(url, rows, fh, 1)
 
 
 def read_pop6h(url, rows, fh, rows_of):
@@ -93,7 +101,7 @@ FIELDS = {
 
 
 def complete_runs(now, look=10):
-    """Cycles (newest first) whose F01-F{HOURS} .idx are all posted, with NOAA's posting times."""
+    """Cycles (newest first) whose .idx are posted for every hour in hour_list(THROUGH), with NOAA's posting times."""
     out = []
     for back in range(1, look + 1):
         c = (now - dt.timedelta(hours=back)).replace(minute=0, second=0, microsecond=0)
@@ -103,22 +111,32 @@ def complete_runs(now, look=10):
         posted = {}
         for key, mod in re.findall(r"<Key>[^<]*core\.f(\d{3})\.co\.grib2\.idx</Key><LastModified>([^<]+)</LastModified>", x):
             posted[int(key)] = mod
-        if all(h in posted for h in range(1, HOURS + 1)): out.append((c, {h: posted[h] for h in range(1, HOURS + 1)}))
+        want = hour_list(THROUGH)
+        if not all(h in posted for h in want): continue
+        # some cycles post placeholder files late in the run (19Z 22 Nov: one message, no temperature, from F66): the last
+        # hour must really carry the fields before the run counts
+        try: last = hrrr.idx_rows(url_of(c, want[-1]))
+        except Exception: continue
+        if not any(r["var"] == "TMP" and r["level"] == "2 m above ground" and r["extra"] == "" for r in last): continue
+        out.append((c, {h: posted[h] for h in want}))
         if len(out) >= KEEP: break
     return out
 
 
 def use_nbm(cycle):
     conus.FIELDS = {**FIELDS, "pop6h": {**FIELDS["pop6h"], "read": pop6h_reader(cycle)}}
-    conus.MODEL = {"name": "NBM", "slug": "nbm", "firstHour": 1, "domain": "CONUS 2.5 km (full native NBM grid)", "run_rows": run_rows,
+    conus.MODEL = {"name": "NBM", "slug": "nbm", "firstHour": 1, "expected": hour_list(THROUGH), "domain": "CONUS 2.5 km (full native NBM grid)", "run_rows": run_rows,
                    "attribution": "NOAA/NWS National Blend of Models (NBM) via NOAA Open Data Dissemination (AWS). Rendered by Forecast Ops. Model guidance, not an official forecast."}
 
 
 def main():
+    global THROUGH
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", required=True); ap.add_argument("--published", default=conus.SITE_URL); ap.add_argument("--now")
-    ap.add_argument("--prev"); ap.add_argument("--max-hours", type=int); ap.add_argument("--carry-only", action="store_true"); ap.add_argument("--changed-output")
+    ap.add_argument("--prev"); ap.add_argument("--max-hours", type=int); ap.add_argument("--carry-only", action="store_true"); ap.add_argument("--through", type=int, default=24); ap.add_argument("--pack", action="store_true"); ap.add_argument("--changed-output")
     a = ap.parse_args()
+    THROUGH = a.through
+    if a.pack: conus.PACK, conus.PRODUCT = True, "conus-v1-packed"   # R2: one file per field-hour, read with range requests
     if a.carry_only:   # republish the live NBM data unchanged (hash-checked), e.g. when this build's NBM step failed
         conus.PREV = a.prev if a.prev and os.path.isdir(a.prev) else None
         prev = json.loads(hrrr.http(f"{a.published}/data/conus/nbm/index.json"))
@@ -140,7 +158,7 @@ def main():
     t0 = time.time(); keep = complete_runs(now)
     if not keep: raise SystemExit("no complete NBM run posted")
     runs, failures, processed = [], [], 0
-    n = a.max_hours or HOURS
+    n = min(a.max_hours or THROUGH, THROUGH)
     for c, posted in keep:
         use_nbm(c)
         rid = c.strftime("%Y%m%d%H"); rel = f"data/conus/nbm/{rid}/{conus.PRODUCT}"; dest = os.path.join(a.site, rel)
@@ -156,7 +174,7 @@ def main():
             failures.append({"id": rid, "error": str(e)[:300]}); shutil.rmtree(dest, ignore_errors=True)
     if not runs: raise SystemExit("nothing publishable: " + json.dumps(failures))
     index = {"schema": 1, "product": conus.PRODUCT, "model": "NBM", "generatedAt": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "runs": runs, "failures": failures,
-             "retention": f"the {KEEP} newest NBM core runs with F01-F{HOURS:02d} posted", "build": {"seconds": round(time.time() - t0, 1), "hoursProcessed": processed, "filesCarried": dict(conus.CARRY_STATS)}}
+             "retention": f"the {KEEP} newest NBM core runs with every hour F01-F{THROUGH:02d} posted (hourly to F48, then 3-hourly)", "build": {"seconds": round(time.time() - t0, 1), "hoursProcessed": processed, "filesCarried": dict(conus.CARRY_STATS)}}
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, "index.json"), "w") as fp: json.dump(index, fp, indent=1)
     if a.changed_output:

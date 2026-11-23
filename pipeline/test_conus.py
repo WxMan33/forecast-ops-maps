@@ -145,4 +145,21 @@ for _fh in (1, 4, 5, 11, 17, 6):
 ok(_na == [1, 4, 5, 6], f"NBM 6-h PoP from a 13Z run: F11 and F17 (windows ending 00Z, 06Z) applicable; F05 would start before the run, as in the live 13Z index ({_na})")
 ok(set(nbm.FIELDS) == {"t2m", "pop1h", "pop6h"} and all(f["attribution"].startswith("NOAA/NWS National Blend") and "no copyright" in f["terms"] for f in nbm.FIELDS.values()),
    "NBM fields carry NBM attribution and terms")
+# 10. NBM Day 3: hourly to F48 then every 3 h; 1-h PoP stops at F48; R2 pruning is per model and never touches a model
+#     whose build is missing from this site
+_hl = nbm.hour_list(72)
+ok(len(_hl) == 56 and _hl[47] == 48 and _hl[48:] == [51, 54, 57, 60, 63, 66, 69, 72] and nbm.hour_list(24) == list(range(1, 25)), f"NBM hours through F72: {len(_hl)} (F01-F48 hourly, then F51-F72 3-hourly)")
+try: nbm.read_pop1h("u", [], 51, None); _p1 = "no"
+except FX.NotApplicable as e: _p1 = str(e)
+ok("through F48" in _p1, f"NBM 1-h PoP after F48 is not applicable, with the reason ({_p1})")
+import r2_sync, json as _j  # noqa: E402
+with tempfile.TemporaryDirectory() as _site:
+    def _put(rel, body=b"x"): os.makedirs(os.path.dirname(os.path.join(_site, rel)), exist_ok=True); open(os.path.join(_site, rel), "wb").write(body)
+    _put("data/conus/index.json", _j.dumps({"runs": [{"path": "data/conus/hrrr/B/conus-v1-packed"}]}).encode()); _put("data/conus/hrrr/B/conus-v1-packed/t2m/f01.pack")
+    _existing = {"data/conus/hrrr/A/conus-v1-packed/t2m/f01.pack": 1, "data/conus/nbm/OLD/conus-v1-packed/t2m/f01.pack": 1}
+    _u, _d, _k = r2_sync.plan(_site, _existing)
+    ok(_d == ["data/conus/hrrr/A/conus-v1-packed/t2m/f01.pack"], f"R2 sync without an NBM build: prunes the old HRRR run only, keeps NBM ({_d})")
+    _put("data/conus/nbm/index.json", _j.dumps({"runs": [{"path": "data/conus/nbm/NEW/conus-v1-packed"}]}).encode()); _put("data/conus/nbm/NEW/conus-v1-packed/t2m/f01.pack")
+    _u, _d, _k = r2_sync.plan(_site, _existing)
+    ok(sorted(_d) == sorted(_existing) and any(u[0] == "data/conus/nbm/index.json" for u in _u), f"R2 sync with an NBM build: prunes the old run of each model and uploads the NBM index ({len(_d)} deleted)")
 print(f"ok - {n} CONUS packager checks passed (with carry)")
