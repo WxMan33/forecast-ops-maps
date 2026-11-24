@@ -24,11 +24,18 @@ KEYS = ("discipline", "parameterCategory", "parameterNumber", "shortName", "type
         "stepUnits", "units", "dataDate", "dataTime")
 
 
+# grid keys of a regular latitude-longitude message (GRIB2 template 3.0, e.g. ECMWF open data); Lambert grids use hrrr.GRID_KEYS
+GRID_KEYS_LL = ("gridType", "Ni", "Nj", "latitudeOfFirstGridPointInDegrees", "longitudeOfFirstGridPointInDegrees", "latitudeOfLastGridPointInDegrees",
+                "longitudeOfLastGridPointInDegrees", "iDirectionIncrementInDegrees", "jDirectionIncrementInDegrees", "iScansNegatively", "jScansPositively",
+                "jPointsAreConsecutive")
+
+
 def decode(buf):
-    """Values (NaN for GRIB missing) plus the identity keys used to confirm the message, and the grid keys."""
+    """Values (NaN for GRIB missing) plus the identity keys used to confirm the message, and the grid keys (Lambert or
+    regular lat-lon, by the message's own gridType)."""
     g = codes_new_from_message(buf)
     try:
-        k = {n: codes_get(g, n) for n in KEYS + hrrr.GRID_KEYS}
+        k = {n: codes_get(g, n) for n in KEYS + (GRID_KEYS_LL if codes_get(g, "gridType") == "regular_ll" else hrrr.GRID_KEYS)}
         for n in ("typeOfStatisticalProcessing", "productDefinitionTemplateNumber", "probabilityType", "scaledValueOfUpperLimit", "scaleFactorOfUpperLimit"):
             try: k[n] = codes_get(g, n)   # the last four identify NBM's deterministic and probability products
             except Exception: k[n] = None
@@ -44,15 +51,16 @@ def _accum(k, a, b): return k["stepType"] == "accum" and k["stepUnits"] == 1 and
 def _param(k, d, c, n): return (k["discipline"], k["parameterCategory"], k["parameterNumber"]) == (d, c, n)
 
 
-def _get(url, rows, var, level, step, check, fh, extra=""):
+def _get(url, rows, var, level, step, check, fh, extra="", http=None):
     """One message by .idx line, confirmed from its GRIB keys; returns (keys, values, source record). `extra` is the .idx
-    qualifier after the step ("" for a plain field; NBM writes e.g. "prob >0.254:prob fcst 255/255" or "ens std dev")."""
+    qualifier after the step ("" for a plain field; NBM writes e.g. "prob >0.254:prob fcst 255/255" or "ens std dev").
+    `http`: the byte-range fetcher (default hrrr.http; ECMWF passes its own, which retries the mirror's throttling quickly)."""
     steps = step if isinstance(step, list) else [step]
     levels = level if isinstance(level, (list, tuple)) else [level]   # the same level can be worded differently (RRFS: "... (considered as a single layer)")
     cand = [r for r in rows if r["var"] == var and r["level"] in levels and r["step"] in steps and r.get("extra", "") == extra]
     if not cand: raise RuntimeError(f"{var} {level} '{step}' not in the index")
     for r in cand:
-        buf = hrrr.http(url, (r["start"], r["end"])); k, v = decode(buf)
+        buf = (http or hrrr.http)(url, (r["start"], r["end"])); k, v = decode(buf)
         if check(k):
             return k, v, {"idx": f'{var}:{level}:{r["step"]}' + (f":{extra}" if extra else ""), "range": [r["start"], r["end"]], "bytes": len(buf), "sha256": hashlib.sha256(buf).hexdigest(),
                           "grib": {x: k[x] for x in ("discipline", "parameterCategory", "parameterNumber", "shortName", "typeOfLevel", "level",

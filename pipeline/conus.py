@@ -132,13 +132,94 @@ def fetch_field(url, fh, field, rows_of):
 
 
 def grid_of(k):
+    """The published grid from a message's own grid keys: the whole Lambert grid (HRRR, NBM, RRFS), or a crop of native
+    cells of a regular lat-lon grid (MODEL["crop"]; ECMWF)."""
+    if k.get("gridType") == "regular_ll": return ll_grid(k, MODEL["crop"])
     g = {x: k[x] for x in hrrr.GRID_KEYS}
     fwd = hrrr.lcc(g); x0, y0 = fwd(g["latitudeOfFirstGridPointInDegrees"], g["longitudeOfFirstGridPointInDegrees"])
     return {**g, "i0": 0, "j0": 0, "nx": g["Nx"], "ny": g["Ny"], "x0": float(x0), "y0": float(y0)}
 
 
+# ---- regular latitude-longitude grids (GRIB2 template 3.0): a crop of native cells, never resampled. Rows are stored south
+# to north (row j = 0 is the southernmost, as on the Lambert grids), columns west to east; cell (i, j) is the GRIB point at
+# column i0 + i and GRIB row j0 + rowStep * j, centred at (lat0 + j * dlat, lon0 + i * dlon).
+LL_PROJECTION = "regular_latitude_longitude (GRIB2 template 3.0), cropped to native cells; rows stored south to north"
+
+
+def is_ll(grid): return (grid or {}).get("gridType") == "regular_ll"
+
+
+def _on_grid(x, d, what):
+    n = round(x / d)
+    if abs(x / d - n) > 1e-6: raise RuntimeError(f"{what} {x} is not on the {d} degree grid")
+    return int(n)
+
+
+def ll_grid(k, crop):
+    """Crop {"lat": [S, N], "lon": [W, E]} (cell centres, degrees) of a regular lat-lon message, by its own grid keys."""
+    g = {x: k[x] for x in FX.GRID_KEYS_LL}
+    if g["iScansNegatively"] or g["jPointsAreConsecutive"]: raise RuntimeError(f"unsupported lat-lon scanning {g}")
+    di, dj = g["iDirectionIncrementInDegrees"], g["jDirectionIncrementInDegrees"]
+    (S, N), (W, E) = crop["lat"], crop["lon"]
+    lat1, lon1 = g["latitudeOfFirstGridPointInDegrees"], g["longitudeOfFirstGridPointInDegrees"]
+    i0 = _on_grid((W - lon1) % 360, di, "west edge"); nx = _on_grid(E - W, di, "crop width") + 1; ny = _on_grid(N - S, dj, "crop height") + 1
+    if g["jScansPositively"]: j0, step = _on_grid(S - lat1, dj, "south edge"), 1        # GRIB rows run south to north
+    else: j0, step = _on_grid(lat1 - S, dj, "south edge"), -1                           # GRIB rows run north to south (ECMWF)
+    if i0 + nx > g["Ni"] or min(j0, j0 + step * (ny - 1)) < 0 or max(j0, j0 + step * (ny - 1)) >= g["Nj"]: raise RuntimeError(f"crop {crop} is not inside the grid")
+    lat0 = round(lat1 + j0 * dj if step == 1 else lat1 - j0 * dj, 9); lon0 = round(((lon1 + i0 * di + 180) % 360) - 180, 9)
+    return {**g, "i0": i0, "j0": j0, "rowStep": step, "nx": nx, "ny": ny, "lat0": lat0, "lon0": lon0, "dlat": dj, "dlon": di}
+
+
+def crop(v, grid):
+    """The published cells of a full-message array in geographic order (rows as GRIB stores them, columns west to east)."""
+    if not is_ll(grid): return v
+    rows = grid["j0"] + grid["rowStep"] * np.arange(grid["ny"])
+    return v[rows][:, grid["i0"]:grid["i0"] + grid["nx"]]
+
+
+def to_cell(grid, lat, lon):
+    """Fractional published cell (i, j) of a latitude/longitude, on either kind of grid."""
+    if is_ll(grid):
+        return (((np.asarray(lon, float) - grid["lon0"] + 180) % 360) - 180) / grid["dlon"], (np.asarray(lat, float) - grid["lat0"]) / grid["dlat"]
+    x, y = hrrr.lcc(grid)(lat, lon)
+    return (x - grid["x0"]) / grid["DxInMetres"] - grid["i0"], (y - grid["y0"]) / grid["DyInMetres"] - grid["j0"]
+
+
+def from_cell(grid, i, j):
+    """Latitude/longitude of a published lat-lon cell centre."""
+    return grid["lat0"] + np.asarray(j) * grid["dlat"], ((grid["lon0"] + np.asarray(i) * grid["dlon"] + 180) % 360) - 180
+
+
+def georef_ll(buf, grid):
+    """Every published cell centre must equal GRIB's own latitude/longitude; eccodes' nearest grid point at each checkpoint
+    must be the cell our arithmetic picks, holding the same value."""
+    from eccodes import codes_new_from_message, codes_get_array, codes_grib_find_nearest, codes_release
+    g = codes_new_from_message(buf)
+    try:
+        shape = (grid["Nj"], grid["Ni"])
+        la = crop(codes_get_array(g, "latitudes").reshape(shape), grid); lo = ((crop(codes_get_array(g, "longitudes").reshape(shape), grid) + 180) % 360) - 180
+        fi, fj = to_cell(grid, la, lo)
+        err = float(max(np.abs(fi - np.arange(grid["nx"])[None, :]).max(), np.abs(fj - np.arange(grid["ny"])[:, None]).max()))
+        if err > 0.01: raise RuntimeError(f"georeference check failed: cell centres differ from GRIB lat/lon by {err:.4f} cells")
+        full = hrrr.grid_values(g); pts = []
+        for name, lat, lon in CHECKPOINTS:
+            nb = codes_grib_find_nearest(g, lat, lon)[0]; r, c = divmod(int(nb["index"]), grid["Ni"])
+            ci, cj = c - grid["i0"], (r - grid["j0"]) * grid["rowStep"]
+            if not (0 <= ci < grid["nx"] and 0 <= cj < grid["ny"]): raise RuntimeError(f"checkpoint {name} outside the crop")
+            mi, mj = to_cell(grid, lat, lon)
+            if (int(round(float(mi))), int(round(float(mj)))) != (ci, cj): raise RuntimeError(f"checkpoint {name}: eccodes nearest cell {(ci, cj)} != ours {(float(mi), float(mj))}")
+            if abs(float(full[r, c]) - float(nb["value"])) > 1e-6: raise RuntimeError(f"checkpoint {name}: index/value mismatch")
+            pts.append({"name": name, "lat": lat, "lon": lon, "cell": [ci, cj], "gribLat": round(float(nb["lat"]), 5), "gribLon": round(((float(nb["lon"]) + 180) % 360) - 180, 5),
+                        "distanceKm": round(float(nb["distance"]), 3), "value": float(nb["value"])})
+    finally:
+        codes_release(g)
+    corners = {"sw": [float(la[0, 0]), float(lo[0, 0])], "se": [float(la[0, -1]), float(lo[0, -1])], "nw": [float(la[-1, 0]), float(lo[-1, 0])], "ne": [float(la[-1, -1]), float(lo[-1, -1])]}
+    return {"maxErrorCells": round(err, 6), "corners": corners, "checkpoints": pts}
+
+
 def georef(buf, grid):
     """Every native cell centre from our projection must match GRIB's own lat/lon; plus nearest-point checkpoints."""
+    if is_ll(grid): return georef_ll(buf, grid)
     saved = hrrr.CHECKPOINTS
     try:
         hrrr.CHECKPOINTS = CHECKPOINTS
@@ -171,9 +252,9 @@ def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
     except FX.NotApplicable as e:
         return {"notApplicable": str(e)}, grid, None
     t1 = time.time()
-    g = grid_of(k); geo = None
+    g = grid_of(k); geo = None; v = crop(v, g)
     if grid is None:
-        r0 = srcs[0]["range"]; geo = georef(hrrr.http(url, tuple(r0)), g)
+        r0 = srcs[0]["range"]; geo = georef(MODEL.get("http", hrrr.http)(url, tuple(r0)), g)
     elif g != grid: raise RuntimeError(f"grid changed within run at f{fh:02d}")
     run = dt.datetime.strptime(f"{k['dataDate']}{int(k['dataTime']):04d}", "%Y%m%d%H%M").replace(tzinfo=UTC)
     if run != cycle: raise RuntimeError(f"f{fh:02d} message is from run {run:%Y%m%d%H}")
@@ -232,18 +313,19 @@ CARRY_STATS = {"local": 0, "http": 0}
 
 # ---- label points: exact native values for the viewer's Values overlay (cities + a regular grid), one small file per field-hour
 LATTICE = 16   # every 16th native cell (48 km), offset by half a step
+LATTICE_LL = 2   # on a 0.25 degree lat-lon grid: every 2nd cell (about 55 km north-south, 40-50 km east-west over the CONUS)
 PLACES = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_places.json"), encoding="utf-8"))["places"]
 
 
 def label_points(grid):
     """[(i, j)] for the places inside the grid, then the lattice row by row; plus the manifest description."""
-    fwd = hrrr.lcc(grid); pl = []
+    pl = []; every = LATTICE_LL if is_ll(grid) else LATTICE
     for name, lat, lon, pop in PLACES:
-        x, y = fwd(lat, lon); i = int(round((float(x) - grid["x0"]) / grid["DxInMetres"])); j = int(round((float(y) - grid["y0"]) / grid["DyInMetres"]))
+        fi, fj = to_cell(grid, lat, lon); i = int(round(float(fi))); j = int(round(float(fj)))
         if 0 <= i < grid["nx"] and 0 <= j < grid["ny"]: pl.append([name, lat, lon, pop, i, j])
-    i0 = j0 = LATTICE // 2; nx = (grid["nx"] - 1 - i0) // LATTICE + 1; ny = (grid["ny"] - 1 - j0) // LATTICE + 1
-    ij = [(p[4], p[5]) for p in pl] + [(i0 + LATTICE * a, j0 + LATTICE * b) for b in range(ny) for a in range(nx)]
-    return ij, {"version": 1, "places": pl, "lattice": {"every": LATTICE, "i0": i0, "j0": j0, "nx": nx, "ny": ny},
+    i0 = j0 = every // 2; nx = (grid["nx"] - 1 - i0) // every + 1; ny = (grid["ny"] - 1 - j0) // every + 1
+    ij = [(p[4], p[5]) for p in pl] + [(i0 + every * a, j0 + every * b) for b in range(ny) for a in range(nx)]
+    return ij, {"version": 1, "places": pl, "lattice": {"every": every, "i0": i0, "j0": j0, "nx": nx, "ny": ny},
                 "encoding": "gzip of int16 little-endian values at L0 scale (value = stored * scale; -32768 = missing): places in order, then the lattice row by row (south to north, west to east)"}
 
 
@@ -349,10 +431,10 @@ def build_run(cycle, role, n, complete, posted, out_dir, rel, old, site_url, wor
                "tilesX": (level_grid(grid["nx"], grid["ny"], L)[0] + TILE - 1) // TILE, "tilesY": (level_grid(grid["nx"], grid["ny"], L)[1] + TILE - 1) // TILE} for L in LEVELS]
     out = {
         "schema": 1, "product": PRODUCT, "model": MODEL["name"], "domain": MODEL["domain"], "cycle": cycle.strftime("%Y-%m-%dT%H:00:00Z"),
-        "role": role, "hoursExpected": n, "status": "complete" if complete and (all({str(h) for h in MODEL["expected"]} <= set(fields[f]["hours"]) for f in fields) if MODEL.get("expected") else set(range(MODEL.get("firstHour", 0), n + 1)) <= set(have)) else ("final with gaps" if complete else "in progress"),
+        "role": role, "hoursExpected": n, **({"hoursPlanned": MODEL["expected"]} if MODEL.get("expected") else {}), "status": "complete" if complete and (all({str(h) for h in MODEL["expected"]} <= set(fields[f]["hours"]) for f in fields) if MODEL.get("expected") else set(range(MODEL.get("firstHour", 0), n + 1)) <= set(have)) else ("final with gaps" if complete else "in progress"),
         "hours": have, "valid": {str(h): (cycle + dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in have},
         "noaaPostedAt": {str(h): posted[h] for h in have if h in posted},
-        "grid": {"projection": "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo, "points": label_points(grid)[1],
+        "grid": {"projection": LL_PROJECTION if is_ll(grid) else "lambert_conformal_conic (GRIB2 template 3.30)", **grid}, "georef": geo, "points": label_points(grid)[1],
         "tile": TILE, "levels": levels, "layout": "packed" if PACK else "tiles",
         **({"packOrder": "levels from coarsest to native; within a level, tile rows from south (ty=0) to north, tiles west to east; each tile a separate gzip member"} if PACK else {}),
         "encoding": "gzip of [low bytes][high bytes] of zigzag-coded int16 row differences (mod 2^16), row-major per tile; L0 value = stored * scale, L1/L2 value = stored * scale * displayStep; -32768 = missing",

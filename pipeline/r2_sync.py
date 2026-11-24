@@ -14,6 +14,9 @@ uploaded, deleted, and kept, so the pilot can report storage and request counts.
 import argparse, hashlib, json, mimetypes, os, sys
 
 
+MODELS = ("nbm", "rrfs", "ecmwf")   # models published under data/conus/<model>/ with their own index.json (HRRR: data/conus/index.json)
+
+
 def plan(site, existing):
     """existing: {key: size} or {key: (size, etag)}. Returns (uploads [(key, path, size, cache)], deletes [key], kept [key]).
     Immutable files are kept when the bucket has the same size; .json files when the bucket's ETag (the MD5 of a single
@@ -25,7 +28,7 @@ def plan(site, existing):
     # each model prunes only its own runs, and only when this build carries that model's run list: a model whose build
     # failed (no index here) keeps everything it already has in the bucket
     prunable, retained = [], set()
-    for model, idx in (("hrrr", os.path.join(root, "index.json")), ("nbm", os.path.join(root, "nbm", "index.json")), ("rrfs", os.path.join(root, "rrfs", "index.json"))):
+    for model, idx in (("hrrr", os.path.join(root, "index.json")), *((m, os.path.join(root, m, "index.json")) for m in MODELS)):
         if not os.path.exists(idx): continue
         prunable.append(f"data/conus/{model}/")
         with open(idx) as f:
