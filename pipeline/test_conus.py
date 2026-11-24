@@ -208,10 +208,10 @@ ok(_m[:9].tolist() == [0, 1, 4, 2, 2, 2, 3, 1, 4] and np.isnan(_m[9:]).all(),
 ok(all(FX.PTYPE_CODES[c] for c in ecmwf.PTYPE_MAP.values()) and set(ecmwf.PTYPE_SOURCE) == set(ecmwf.PTYPE_MAP), "every mapped ECMWF code is documented and lands on a viewer category")
 _rows = [{"var": "10fg", "level": "sfc", "step": "6"}, {"var": "10fg3", "level": "sfc", "step": "93"}]
 ok(ecmwf.gust_param(_rows, 6) == ("10fg", 1) and ecmwf.gust_param(_rows, 93) == ("10fg3", 3), "ECMWF gust: 1-h maximum (10fg) through F90, 3-h maximum (10fg3) after")
-for _r, _fh in ((ecmwf.read_gust, 0), (ecmwf.read_apcp_run, 0), (ecmwf.read_asnow_run, 0)):
+for _r, _fh in ((ecmwf.read_gust, 0), (ecmwf.read_apcp_run, 0), (ecmwf.read_asnow_run, 0), (ecmwf.read_asnowk_run, 0)):
     try: _r("u", [], _fh, None); ok(False, "F00 window should be not applicable")
     except FX.NotApplicable: ok(True, f"ECMWF {_r.__name__} at F00 is not applicable (0-0 h window)")
-ok(set(ecmwf.FIELDS) == {"t2m", "d2m", "gust", "ptype", "apcp_run", "asnow_run"} and all(sp["attribution"] == ecmwf.CREDIT and "CC BY 4.0" in sp["terms"]
+ok(set(ecmwf.FIELDS) == {"t2m", "d2m", "gust", "ptype", "apcp_run", "asnow_run", "asnowk_run"} and all(sp["attribution"] == ecmwf.CREDIT and "CC BY 4.0" in sp["terms"]
    and all(sp.get(k) for k in ("source", "derivation")) for sp in ecmwf.FIELDS.values()), "ECMWF fields carry the ECMWF CC BY 4.0 credit, terms, source and derivation")
 ok("10:1" in ecmwf.FIELDS["asnow_run"]["label"] and "water equivalent" in ecmwf.FIELDS["asnow_run"]["derivation"] and ecmwf.FIELDS["asnow_run"]["snowRatio"] == 10,
    "ECMWF snowfall states its 10:1 ratio and that ECMWF provides water equivalent only")
@@ -262,4 +262,59 @@ with tempfile.TemporaryDirectory() as _site:
     ok("ecmwf" in r2_sync.MODELS and r2_sync.plan(_site, _ex)[1] == [], "R2 sync without an ECMWF build keeps the ECMWF data in the bucket")
     _put("data/conus/ecmwf/index.json", _j.dumps({"runs": [{"path": "data/conus/ecmwf/NEW/conus-v1-packed"}]}).encode())
     ok(r2_sync.plan(_site, _ex)[1] == list(_ex), "R2 sync with an ECMWF build prunes ECMWF runs no longer retained")
+
+# 13. ECMWF Kuchera snowfall: the ratio at its boundary temperatures, below-ground levels skipped, interval sums, decreases -> 0
+_kr = lambda tmax: float(ecmwf.kuchera_ratio(np.array([tmax]), np.array([101325.0]), {})[0][0])
+for _t, _want in ((271.16, 12.0), (266.16, 17.0), (276.16, 2.0), (277.16, 0.0), (300.0, 0.0), (271.66, 11.0), (251.16, 32.0)):
+    ok(abs(_kr(_t) - _want) < 1e-9, f"Kuchera ratio at Tmax {_t} K = {_want} (got {_kr(_t)})")
+ok(_kr(271.16 + 1e-9) <= 12 and abs(_kr(271.16 + 1e-9) - 12) < 1e-6, "Kuchera ratio is continuous at 271.16 K (both branches give 12)")
+# Tmax: the warmest of 2t and the pressure levels at or above the ground; a level below the ground (pressure > sp) is ignored
+_t2 = np.array([265.0, 265.0, 265.0, 265.0]); _sp = np.array([101000.0, 86000.0, 92500.0, 70000.0])
+_temps = {1000: np.array([275.0, 290.0, 290.0, 290.0]), 925: np.array([268.0, 268.0, 272.0, 290.0]), 850: np.array([266.0, 269.0, 260.0, 290.0]),
+          700: np.array([260.0, 260.0, 260.0, 270.0]), 600: np.full(4, 255.0), 500: np.full(4, 245.0)}
+_ratio, _tmax = ecmwf.kuchera_ratio(_t2, _sp, _temps)
+ok(_tmax.tolist() == [275.0, 269.0, 272.0, 270.0],
+   f"Kuchera Tmax: level above ground counts (warm 1000 hPa at sp 1010 hPa); 1000/925 hPa below an 860 hPa surface are skipped (850 hPa counts); 925 hPa at sp exactly 925 hPa counts; at sp 700 hPa only 700 hPa and up ({_tmax.tolist()})")
+ok(np.allclose(_ratio, [4.32, 14.16, 10.32, 13.16]), f"Kuchera ratios from those profiles ({_ratio.tolist()})")
+_m2in = FX.IN_PER_M
+_sf = [np.array([0.001, 0.0, 0.002]), np.array([0.003, 0.0, 0.0019]), np.array([0.004, 0.001, 0.0025])]   # run totals (m) at F03, F06, F09
+_rt = [np.array([10.0, 12.0, 15.0]), np.array([20.0, 12.0, 15.0]), np.array([5.0, 12.0, 15.0])]
+_tot = ecmwf.kuchera_total(list(zip(_sf, _rt)))
+_want = np.array([0.001 * 10 + 0.002 * 20 + 0.001 * 5, 0.001 * 12, 0.002 * 15 + 0.0 + 0.0006 * 15]) * _m2in
+ok(np.allclose(_tot, _want), f"Kuchera run total = sum over 3-h intervals of dSWE x the ratio at the interval's end ({_tot.tolist()} vs {_want.tolist()})")
+ok(ecmwf.kuchera_interval(np.array([0.0019]), np.array([0.002]), np.array([15.0]))[0] == 0.0, "Kuchera: a decrease of the snowfall water equivalent run total gives 0, never negative snow")
+_old_fields, _old_model = conus.FIELDS, conus.MODEL
+try:
+    ecmwf.use_ecmwf(dt.datetime(2026, 11, 23, 12, tzinfo=UTC))
+    _gk = conus.ll_grid(_K, ecmwf.CROP); _rng = np.random.default_rng(3)
+    def _fake_rows(steps):
+        ro = lambda fh: ("u", [])
+        ro.kuchera = {s: {"sf": _c, "ratio": _rng.uniform(0, 25, _c.shape), "tmax": None, "k": {**_K, "dataDate": 20261123, "dataTime": 1200},
+                          "sources": [{"sha256": f"{s:064x}"}]} for s, _c in steps}
+        ro.lock = __import__("threading").Lock(); return ro
+    _cum = np.cumsum(_rng.uniform(0, 0.002, (40, 141, 301)), axis=0); _cum[5, :10, :10] -= 0.0001   # one small decrease (packing noise)
+    _ro = _fake_rows([(s, _cum[s // 3 - 1]) for s in ecmwf.STEPS[1:]])
+    _k9, _v9, _s9 = ecmwf.read_asnowk_run("u", [], 9, _ro); _k120, _v120, _s120 = ecmwf.read_asnowk_run("u", [], 120, _ro)
+    _byhand = ecmwf.kuchera_total([(_ro.kuchera[s]["sf"], _ro.kuchera[s]["ratio"]) for s in ecmwf.STEPS[1:]])
+    ok(np.array_equal(conus.crop(_v120, _gk), _byhand) and np.isnan(_v120).sum() == 1440 * 721 - 141 * 301,
+       "Kuchera reader: the F120 total is the sum of all 40 intervals, on the published cells only (the rest of the globe is not published)")
+    ok(_s120[0]["derivation"]["steps"] == list(range(3, 121, 3)) and _s9[0]["derivation"]["steps"] == [3, 6, 9] and _s120[0]["derivation"]["method"] == "kuchera",
+       "Kuchera source record lists every step its total was built from")
+    ok((np.diff(np.stack([conus.crop(ecmwf.read_asnowk_run("u", [], s, _ro)[1], _gk) for s in (3, 6, 9, 12)]), axis=0) >= 0).all(),
+       "Kuchera run totals never decrease from step to step (the decrease at F18 is clipped, not subtracted)")
+    # a later build (new rows_of, earlier hours carried) rebuilds the total from the GRIB of every step, not from published values
+    _ro2 = _fake_rows([]); _ro2.kuchera = {s: dict(_ro.kuchera[s]) for s in ecmwf.STEPS[1:]}
+    ok(np.array_equal(ecmwf.read_asnowk_run("u", [], 120, _ro2)[1], _v120, equal_nan=True), "Kuchera: a later build computes the same F120 total (independent of what was carried)")
+    _ro3 = _fake_rows([(s, _cum[s // 3 - 1]) for s in ecmwf.STEPS[1:] if s != 6]); _ro3.kuchera.pop(6, None)
+    _ro3_fail = lambda fh: (_ for _ in ()).throw(RuntimeError(f"step {fh} not posted")); _ro3_fail.kuchera, _ro3_fail.lock = _ro3.kuchera, _ro3.lock
+    try: ecmwf.read_asnowk_run("u", [], 9, _ro3_fail); ok(False, "a missing step must not be skipped")
+    except FX.NotApplicable: ok(False, "a missing step is a gap, not not-applicable")
+    except RuntimeError: ok(True, "Kuchera: a step missing from the mirror fails the hour (missing, retried) instead of silently skipping an interval")
+finally:
+    conus.FIELDS, conus.MODEL = _old_fields, _old_model
+_ks = ecmwf.FIELDS["asnowk_run"]; _ts = ecmwf.FIELDS["asnow_run"]
+ok(_ks["snowRatio"] == "kuchera" and "271.16" in _ks["snowRatioFormula"] and "END of the interval" in _ks["derivation"] and "500 hPa" in _ks["note"]
+   and all(_ks[x] == _ts[x] for x in ("units", "scale", "displayStep", "coarse", "window", "firstHour")),
+   "Kuchera field: same encoding, units, levels and window as the 10:1 run total; ratio method and formula in the manifest; end-of-interval approximation stated")
+ok(_ts["snowRatio"] == 10 and "10:1" in _ts["label"], "the 10:1 ECMWF snowfall field is unchanged")
 print(f"ok - {n} CONUS packager checks passed (with carry)")

@@ -20,12 +20,14 @@ Each message is confirmed from its own GRIB keys (checked on the 23 Nov 2026 12Z
   tp     0/1/193 surface, accum 0-N h, m (liquid water equivalent)
   sf     0/1/198 surface, accum 0-N h, m of water equivalent (ECMWF gives snowfall ONLY as water equivalent)
   ptype  0/1/19  surface, instant, WMO code table 4.201 (ECMWF uses 0 for no precipitation)
+  sp     0/3/0   surface, instant, Pa (Kuchera snowfall: which pressure levels are above the ground)
+  t      0/0/0   isobaricInhPa 1000, 925, 850, 700, 600, 500, instant, K (Kuchera snowfall: the warmest temperature aloft)
 At step 0 the accumulations and gust messages are constant zero fields (0-0 h windows): published as not applicable.
 Not offered: 1-h fields (the steps are 3-hourly), reflectivity, freezing-rain accumulation, PoP (not in the open data).
 
 Usage: python pipeline/ecmwf.py --site SITE [--published URL] [--prev DIR] [--max-hours N] [--pack] [--now ISO] [--changed-output F]
 """
-import argparse, datetime as dt, json, os, random, re, shutil, sys, time, urllib.error, urllib.request
+import argparse, concurrent.futures as cf, datetime as dt, hashlib, json, os, random, re, shutil, sys, threading, time, urllib.error, urllib.request
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,13 +40,20 @@ KEEP = 2                            # the two newest runs (enough for the cycle 
 GIVE_UP_H = 12                      # a run still missing steps this long after its cycle time is final with gaps
 CROP = {"lat": [20.0, 55.0], "lon": [-135.0, -60.0]}   # cell centres, degrees: covers the HRRR CONUS footprint
 SNOW_RATIO = 10                     # stated snow-to-liquid ratio applied to ECMWF's snowfall water equivalent
+# Kuchera snow-to-liquid ratio (the method of Evan Kuchera, as used in common NWP snowfall displays): from Tmax, the warmest
+# temperature (K) between the ground and 500 hPa, ratio = 12 + (271.16 - Tmax) when Tmax <= 271.16 K, else 12 + 2 (271.16 - Tmax);
+# floored at 0 (no negative snow). No upper cap is applied.
+KUCHERA_T0 = 271.16
+KUCHERA_LEVELS = (1000, 925, 850, 700, 600, 500)   # hPa; 2t is the surface level
+KUCHERA_FORMULA = ("Tmax = max(2t, t at each of 1000/925/850/700/600/500 hPa whose pressure is <= the cell's surface pressure sp), K; "
+                   "ratio = 12 + 2*(271.16 - Tmax) if Tmax > 271.16 else 12 + (271.16 - Tmax); ratio floored at 0, no upper cap")
 UTC = dt.timezone.utc
 SRC = "ECMWF IFS open data YYYYMMDDHH0000-<step>h-oper-fc.grib2 (0.25 degree, AWS mirror s3://ecmwf-forecasts)"
 CREDIT = "© ECMWF, CC BY 4.0 (open data; cropped and encoded by Forecast Ops)"
 TERMS = ("ECMWF open data: Copyright © ECMWF, licensed under Creative Commons Attribution 4.0 International (CC BY 4.0, "
          "https://creativecommons.org/licenses/by/4.0/). Changes made by Forecast Ops: cropped to native 0.25 degree cells over the CONUS "
          "(never resampled), converted to US units, ECMWF precipitation-type codes grouped into four categories, snowfall water equivalent "
-         "shown at a stated 10:1 ratio, and encoded as map tiles. ECMWF does not endorse Forecast Ops or this rendering.")
+         "shown at a stated 10:1 ratio and, as a second field, at a Kuchera ratio computed from ECMWF temperatures, and encoded as map tiles. ECMWF does not endorse Forecast Ops or this rendering.")
 # ECMWF precipitation type (WMO code table 4.201) -> the viewer's categories (fields.PTYPE_CODES: 0 none, 1 rain, 2 snow,
 # 3 ice pellets, 4 freezing rain). Codes with no matching category (2 thunderstorm, 4 mixed/ice, 9 graupel, 10 hail, ...)
 # and any non-integer value are left MISSING, never shown as rain.
@@ -88,6 +97,7 @@ def run_rows(cycle):
     def rows_of(fh):
         if fh not in cache: u = url_of(cycle, fh); cache[fh] = (u, index_rows(u))
         return cache[fh]
+    rows_of.kuchera = {}; rows_of.lock = threading.Lock()   # per-run cache of the Kuchera inputs of each step (shared by the worker threads)
     return rows_of
 
 
@@ -140,6 +150,76 @@ def read_asnow_run(url, rows, fh, rows_of):
     return k, np.where(v >= 0, v * FX.IN_PER_M * SNOW_RATIO, np.nan), [s]
 
 
+def kuchera_ratio(t2, sp, temps):
+    """(ratio, Tmax) per cell. t2: 2-m temperature (K); sp: surface pressure (Pa); temps: {hPa: temperature (K)}. A pressure
+    level counts only where it is at or above the ground (level pressure <= sp): ECMWF extrapolates levels below the ground."""
+    tmax = np.array(t2, np.float64, copy=True)
+    for p, t in temps.items():
+        t = np.asarray(t, np.float64); use = (p * 100.0 <= np.asarray(sp)) & np.isfinite(t)
+        tmax = np.where(use & (t > tmax), t, tmax)
+    ratio = np.where(tmax > KUCHERA_T0, 12 + 2 * (KUCHERA_T0 - tmax), 12 + (KUCHERA_T0 - tmax))
+    return np.maximum(ratio, 0.0), tmax
+
+
+def kuchera_interval(sf_now, sf_before, ratio):
+    """Inches of snow in one 3-h interval: the snowfall water equivalent gained (m, both run totals; decreases are packing
+    noise -> 0) in inches of liquid, times the Kuchera ratio of the profile at the END of the interval."""
+    return np.maximum(np.asarray(sf_now) - np.asarray(sf_before), 0.0) * FX.IN_PER_M * ratio
+
+
+def kuchera_total(steps):
+    """Run total (inches) from [(sf, ratio)] for the steps 3, 6, ... N in order (sf: run-total water equivalent, m)."""
+    tot, prev = None, 0.0
+    for sf, ratio in steps:
+        inc = kuchera_interval(sf, prev, ratio); tot = inc if tot is None else tot + inc; prev = sf
+    return tot
+
+
+def _uncrop(vals, k):
+    """A cropped array back on the full message grid (NaN elsewhere), for conus.process_hour to crop again."""
+    g = conus.grid_of(k); full = np.full((k["Nj"], k["Ni"]), np.nan)
+    full[(g["j0"] + g["rowStep"] * np.arange(g["ny"]))[:, None], np.arange(g["i0"], g["i0"] + g["nx"])[None, :]] = vals
+    return full
+
+
+def kuchera_step(rows_of, s):
+    """The published cells' Kuchera inputs at step s (cached per run): sf (m), ratio, Tmax, the sf keys and the sources."""
+    with rows_of.lock: lk = rows_of.kuchera.setdefault(("lock", s), threading.Lock())
+    with lk:
+        if s in rows_of.kuchera: return rows_of.kuchera[s]
+        url, rows = rows_of(s)
+        k, sf, s_sf = _sfc(url, rows, "sf", s, lambda k: _accum(k, s, 198, "m of water equivalent"))
+        g = conus.grid_of(k); c = lambda v: conus.crop(v, g)
+        k2, t2, s_t2 = _sfc(url, rows, "2t", s, lambda k: FX._param(k, 0, 0, 0) and _hag(k, 2) and FX._instant(k, s) and k["units"] == "K")
+        k3, sp, s_sp = _sfc(url, rows, "sp", s, lambda k: FX._param(k, 0, 3, 0) and k["typeOfLevel"] == "surface" and FX._instant(k, s) and k["units"] == "Pa")
+        temps, srcs = {}, [s_sf, s_t2, s_sp]
+        for p in KUCHERA_LEVELS:
+            kp, tp, s_t = FX._get(url, rows, "t", f"pl:{p}", str(s), lambda k, p=p: FX._param(k, 0, 0, 0) and k["typeOfLevel"] == "isobaricInhPa" and k["level"] == p
+                                  and FX._instant(k, s) and k["units"] == "K", s, http=http)
+            temps[p] = c(tp); srcs.append(s_t)
+            if conus.grid_of(kp) != g: raise RuntimeError(f"t {p} hPa at step {s} is on another grid")
+        if conus.grid_of(k2) != g or conus.grid_of(k3) != g: raise RuntimeError(f"Kuchera inputs at step {s} are on different grids")
+        ratio, tmax = kuchera_ratio(c(t2), c(sp), temps)
+        out = rows_of.kuchera[s] = {"sf": c(sf), "ratio": ratio, "tmax": tmax, "k": k, "sources": srcs}
+        return out
+
+
+def read_asnowk_run(url, rows, fh, rows_of):
+    """Kuchera run total at step fh, rebuilt from the GRIB every time (never from published tiles): every 3-h step from F03
+    to fh is read (cached per run), so a partially published run or carried hours cannot change the result. A step
+    missing from the mirror fails this hour (published as missing, retried on the next build)."""
+    if fh < 1: raise FX.NotApplicable("no accumulation at the analysis step")
+    steps = [s for s in STEPS if 0 < s <= fh]
+    if not hasattr(rows_of, "kuchera"): rows_of.kuchera = {}; rows_of.lock = threading.Lock()
+    with cf.ThreadPoolExecutor(3) as ex: ins = list(ex.map(lambda s: kuchera_step(rows_of, s), steps))   # steps fetched in parallel, each once per run
+    tot = kuchera_total([(x["sf"], x["ratio"]) for x in ins])
+    last = ins[-1]; srcs = [dict(x) for x in last["sources"]]
+    digest = hashlib.sha256("".join(src["sha256"] for x in ins for src in x["sources"]).encode()).hexdigest()
+    srcs[0]["derivation"] = {"method": "kuchera", "steps": steps, "messagesPerStep": len(last["sources"]), "inputsSha256": digest,
+                             "ratioAtStep": [round(float(np.nanmin(last["ratio"])), 2), round(float(np.nanmax(last["ratio"])), 2)]}
+    return last["k"], _uncrop(tot, last["k"]), srcs
+
+
 def map_ptype(v):
     """ECMWF code table 4.201 values -> viewer categories; unknown or non-integer codes -> NaN (missing)."""
     v = np.asarray(v, np.float64); r = np.round(v); whole = np.isfinite(v) & (np.abs(v - r) < 1e-6); out = np.full(v.shape, np.nan)
@@ -182,6 +262,15 @@ FIELDS = {
                       f"derived: ECMWF provides snowfall only as water equivalent; m converted to inches and multiplied by a fixed {SNOW_RATIO}:1 snow-to-liquid ratio "
                       "(not a snow-density forecast); L1/L2 block maximum to 0.1 in", window="run start to valid time", firstHour=3, snowRatio=SNOW_RATIO,
                       note=f"ECMWF gives snowfall as water equivalent only: shown at a fixed {SNOW_RATIO}:1 ratio, not ECMWF's own snow depth."),
+    "asnowk_run": spec("Snowfall since run start (ECMWF, Kuchera ratio from water equivalent)", "in", 0.01, 10, "block max", read_asnowk_run,
+                       f"{SRC}, at every 3-h step from F03 to the valid time: sf (GRIB 0/1/198, surface, accum 0-N h, m of water equivalent), 2t (GRIB 0/0/0, "
+                       "heightAboveGround 2, K), sp (GRIB 0/3/0, surface, Pa) and t (GRIB 0/0/0, isobaricInhPa 1000/925/850/700/600/500, K)",
+                       "derived: for each 3-h interval, the snowfall water equivalent gained (sf at its end minus sf at its start, m converted to inches of liquid, "
+                       "decreases set to 0) times the Kuchera snow-to-liquid ratio of the temperature profile at the END of the interval (an approximation: "
+                       f"ECMWF gives no profile during the interval); the run total is the sum of the intervals. {KUCHERA_FORMULA}. "
+                       "L1/L2 block maximum to 0.1 in", window="run start to valid time", firstHour=3, snowRatio="kuchera", snowRatioFormula=KUCHERA_FORMULA,
+                       note="ECMWF gives snowfall as water equivalent only: shown with a Kuchera snow-to-liquid ratio from the warmest temperature between the ground and "
+                            "about 18,000 ft (500 hPa) at the end of each 3-h step: colder columns give fluffier snow, near-freezing columns wetter snow. Not ECMWF's own snow depth."),
 }
 
 
