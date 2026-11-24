@@ -192,4 +192,74 @@ with tempfile.TemporaryDirectory() as _site:
     ok(r2_sync.plan(_site, _ex)[1] == [], "R2 sync without an RRFS build keeps the RRFS data in the bucket")
     _put("data/conus/rrfs/index.json", _j.dumps({"runs": [{"path": "data/conus/rrfs/NEW/conus-v1-packed"}]}).encode())
     ok(r2_sync.plan(_site, _ex)[1] == list(_ex), "R2 sync with an RRFS build prunes RRFS runs no longer retained")
+# 12. ECMWF IFS open data: 3-hourly steps to F120, two runs kept (newest may be partial), ptype codes, the lat-lon crop
+import ecmwf  # noqa: E402
+ok(ecmwf.STEPS == list(range(0, 121, 3)) and len(ecmwf.STEPS) == 41 and ecmwf.CYCLES == (0, 12), "ECMWF steps: F00-F120 every 3 h (41), 00Z and 12Z runs")
+_now = dt.datetime(2026, 11, 24, 9, tzinfo=UTC)
+_av = {dt.datetime(2026, 11, 24, 0, tzinfo=UTC): {h: "x" for h in range(0, 49, 3)}, dt.datetime(2026, 11, 23, 12, tzinfo=UTC): {h: "x" for h in ecmwf.STEPS},
+       dt.datetime(2026, 11, 23, 0, tzinfo=UTC): {h: "x" for h in ecmwf.STEPS}}
+_p = ecmwf.plan(_av, _now)
+ok([(c.day, c.hour, r, d) for c, r, _, d, _ in _p] == [(24, 0, "newest", False), (23, 12, "previous", True)], f"ECMWF retention: the two newest runs, the newest published while partial ({[(c.hour, r, d) for c, r, _, d, _ in _p]})")
+ok(ecmwf.plan(_av, dt.datetime(2026, 11, 24, 13, tzinfo=UTC))[0][3] is True, "ECMWF: a run still missing steps 12 h after its cycle time is final (with gaps)")
+_codes = np.array([0, 1, 3, 5, 6, 7, 8, 11, 12, 2, 4, 9, 10, 1.5, np.nan, 255])
+_m = ecmwf.map_ptype(_codes)
+ok(_m[:9].tolist() == [0, 1, 4, 2, 2, 2, 3, 1, 4] and np.isnan(_m[9:]).all(),
+   f"ECMWF ptype: rain/drizzle -> rain, snow/wet snow/mix -> snow, ice pellets, freezing rain/drizzle -> freezing rain; unknown and non-integer codes missing, never rain ({_m.tolist()})")
+ok(all(FX.PTYPE_CODES[c] for c in ecmwf.PTYPE_MAP.values()) and set(ecmwf.PTYPE_SOURCE) == set(ecmwf.PTYPE_MAP), "every mapped ECMWF code is documented and lands on a viewer category")
+_rows = [{"var": "10fg", "level": "sfc", "step": "6"}, {"var": "10fg3", "level": "sfc", "step": "93"}]
+ok(ecmwf.gust_param(_rows, 6) == ("10fg", 1) and ecmwf.gust_param(_rows, 93) == ("10fg3", 3), "ECMWF gust: 1-h maximum (10fg) through F90, 3-h maximum (10fg3) after")
+for _r, _fh in ((ecmwf.read_gust, 0), (ecmwf.read_apcp_run, 0), (ecmwf.read_asnow_run, 0)):
+    try: _r("u", [], _fh, None); ok(False, "F00 window should be not applicable")
+    except FX.NotApplicable: ok(True, f"ECMWF {_r.__name__} at F00 is not applicable (0-0 h window)")
+ok(set(ecmwf.FIELDS) == {"t2m", "d2m", "gust", "ptype", "apcp_run", "asnow_run"} and all(sp["attribution"] == ecmwf.CREDIT and "CC BY 4.0" in sp["terms"]
+   and all(sp.get(k) for k in ("source", "derivation")) for sp in ecmwf.FIELDS.values()), "ECMWF fields carry the ECMWF CC BY 4.0 credit, terms, source and derivation")
+ok("10:1" in ecmwf.FIELDS["asnow_run"]["label"] and "water equivalent" in ecmwf.FIELDS["asnow_run"]["derivation"] and ecmwf.FIELDS["asnow_run"]["snowRatio"] == 10,
+   "ECMWF snowfall states its 10:1 ratio and that ECMWF provides water equivalent only")
+_real = ecmwf.hrrr.http
+_real_e = ecmwf.http
+try:
+    _real_e = ecmwf.http; ecmwf.http = lambda url, *a, **k: (b'{"param": "2t", "levtype": "sfc", "step": "9", "_offset": 100, "_length": 50}\n'
+                                             b'{"param": "t", "levtype": "pl", "levelist": "850", "step": "9", "_offset": 150, "_length": 7}\n') if url.endswith("-9h-oper-fc.index") else 1 / 0
+    _ix = ecmwf.index_rows(ecmwf.url_of(dt.datetime(2026, 11, 23, 12, tzinfo=UTC), 9))
+finally:
+    ecmwf.hrrr.http = _real; ecmwf.http = _real_e
+ok([(r["var"], r["level"], r["step"], r["start"], r["end"]) for r in _ix] == [("2t", "sfc", "9", 100, 149), ("t", "pl:850", "9", 150, 156)], f"ECMWF .index JSON lines -> byte ranges ({_ix})")
+# lat-lon grid: the ECMWF global 0.25 degree keys -> the CONUS crop, cells <-> lat/lon, the crop of a full array, label points
+_K = {"gridType": "regular_ll", "Ni": 1440, "Nj": 721, "latitudeOfFirstGridPointInDegrees": 90.0, "longitudeOfFirstGridPointInDegrees": 180.0, "latitudeOfLastGridPointInDegrees": -90.0,
+      "longitudeOfLastGridPointInDegrees": 179.75, "iDirectionIncrementInDegrees": 0.25, "jDirectionIncrementInDegrees": 0.25, "iScansNegatively": 0, "jScansPositively": 0, "jPointsAreConsecutive": 0}
+_g = conus.ll_grid(_K, ecmwf.CROP)
+ok((_g["i0"], _g["j0"], _g["rowStep"], _g["nx"], _g["ny"], _g["lat0"], _g["lon0"]) == (180, 280, -1, 301, 141, 20.0, -135.0), f"ECMWF crop: columns 180-480, GRIB rows 280 up to 140, 301 x 141 cells from 20N 135W ({_g})")
+_fi, _fj = conus.to_cell(_g, *conus.from_cell(_g, np.arange(301)[None, :], np.arange(141)[:, None]))
+ok(np.abs(_fi - np.arange(301)[None, :]).max() < 1e-9 and np.abs(_fj - np.arange(141)[:, None]).max() < 1e-9, "lat-lon cells round trip (cell -> lat/lon -> cell) everywhere")
+_lat = np.repeat((90 - 0.25 * np.arange(721))[:, None], 1440, axis=1); _lon = np.repeat((180 + 0.25 * np.arange(1440))[None, :], 721, axis=0)
+_cl, _co = conus.crop(_lat, _g), ((conus.crop(_lon, _g) + 180) % 360) - 180
+ok(_cl.shape == (141, 301) and _cl[0, 0] == 20 and _cl[-1, 0] == 55 and _co[0, 0] == -135 and _co[0, -1] == -60, "the crop is native cells, rows south to north, columns west to east")
+_ij, _pd = conus.label_points(_g)
+ok(_pd["lattice"]["every"] == conus.LATTICE_LL and len(_ij) == len(_pd["places"]) + _pd["lattice"]["nx"] * _pd["lattice"]["ny"] and len(_pd["places"]) > 50
+   and all(_cl[j, i] == round(lat * 4) / 4 and _co[j, i] == round(lon * 4) / 4 for (_n, lat, lon, _pop, i, j) in _pd["places"]),
+   f"lat-lon label points: {len(_pd['places'])} places on their nearest 0.25 degree cell, plus an every-{conus.LATTICE_LL} lattice")
+_bad = {**_K, "iScansNegatively": 1}
+try: conus.ll_grid(_bad, ecmwf.CROP); ok(False, "unsupported scanning accepted")
+except RuntimeError: ok(True, "a lat-lon grid scanning east to west is refused, not mis-placed")
+try: conus.ll_grid(_K, {"lat": [20.1, 55.0], "lon": [-135.0, -60.0]}); ok(False, "off-grid crop accepted")
+except RuntimeError: ok(True, "a crop bound between grid points is refused (crop, never resample)")
+# a real regular_ll GRIB message (eccodes sample): georef_ll checks every cell against GRIB's own lat/lon and the checkpoints
+from eccodes import codes_grib_new_from_samples as _new, codes_set as _set, codes_set_values as _setv, codes_get_message as _msg, codes_release as _rel  # noqa: E402
+_s = _new("regular_ll_sfc_grib2")
+for _k2, _v2 in (("Ni", 1440), ("Nj", 721), ("latitudeOfFirstGridPointInDegrees", 90.0), ("longitudeOfFirstGridPointInDegrees", 180.0), ("latitudeOfLastGridPointInDegrees", -90.0),
+                 ("longitudeOfLastGridPointInDegrees", 179.75), ("iDirectionIncrementInDegrees", 0.25), ("jDirectionIncrementInDegrees", 0.25), ("jScansPositively", 0)): _set(_s, _k2, _v2)
+_setv(_s, np.arange(1440 * 721, dtype=float) % 1000); _buf = _msg(_s); _rel(_s)
+_k, _v = FX.decode(_buf); _g2 = conus.ll_grid(_k, ecmwf.CROP)
+_geo = conus.georef(_buf, _g2)
+ok(_g2 == _g and _geo["maxErrorCells"] < 1e-6 and len(_geo["checkpoints"]) == len(conus.CHECKPOINTS) and _geo["corners"]["sw"] == [20.0, -135.0],
+   f"a real lat-lon GRIB: decoded grid = the crop, every cell centre = GRIB lat/lon (error {_geo['maxErrorCells']}), eccodes nearest points = our cells")
+ok(all(conus.crop(_v, _g2)[c["cell"][1], c["cell"][0]] == c["value"] for c in _geo["checkpoints"]), "checkpoint values read through the crop equal eccodes' nearest-point values")
+# R2: ECMWF is in the per-model prune list
+with tempfile.TemporaryDirectory() as _site:
+    def _put(rel, body=b"x"): os.makedirs(os.path.dirname(os.path.join(_site, rel)), exist_ok=True); open(os.path.join(_site, rel), "wb").write(body)
+    _put("data/conus/index.json", _j.dumps({"runs": []}).encode())
+    _ex = {"data/conus/ecmwf/OLD/conus-v1-packed/t2m/f03.pack": 1}
+    ok("ecmwf" in r2_sync.MODELS and r2_sync.plan(_site, _ex)[1] == [], "R2 sync without an ECMWF build keeps the ECMWF data in the bucket")
+    _put("data/conus/ecmwf/index.json", _j.dumps({"runs": [{"path": "data/conus/ecmwf/NEW/conus-v1-packed"}]}).encode())
+    ok(r2_sync.plan(_site, _ex)[1] == list(_ex), "R2 sync with an ECMWF build prunes ECMWF runs no longer retained")
 print(f"ok - {n} CONUS packager checks passed (with carry)")

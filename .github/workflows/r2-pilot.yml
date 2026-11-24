@@ -51,6 +51,16 @@ jobs:
             && python pipeline/spotcheck_conus.py _r2 auto 0 --model rrfs \
             && python pipeline/spotcheck_conus.py _r2 auto 6 --model rrfs \
             || { rm -rf _r2/data/conus/rrfs; echo "::warning::RRFS not built this run; R2 keeps its existing RRFS data"; }
+      - name: ECMWF IFS open data 0.25° over the CONUS (00/12Z, F00-F120 every 3 h), packed, checked against the GRIB
+        # Source: ECMWF open data on its AWS mirror (s3://ecmwf-forecasts), © ECMWF, CC BY 4.0. A failed ECMWF build uploads no
+        # ECMWF index, so the sync keeps the ECMWF data already in the bucket
+        continue-on-error: true
+        run: |
+          python pipeline/ecmwf.py --pack --site _r2 --prev _r2_prev --published "${R2_PUBLIC_URL%/}" \
+            && python pipeline/spotcheck_conus.py _r2 auto 0 --model ecmwf \
+            && python pipeline/spotcheck_conus.py _r2 auto 6 --model ecmwf \
+            && python pipeline/spotcheck_conus.py _r2 auto 96 --model ecmwf \
+            || { rm -rf _r2/data/conus/ecmwf; echo "::warning::ECMWF not built this run; R2 keeps its existing ECMWF data"; }
       - name: Upload changes to R2 and remove expired runs
         shell: bash   # -o pipefail: a missing setting or failed upload fails the run (tee alone would hide it)
         env:

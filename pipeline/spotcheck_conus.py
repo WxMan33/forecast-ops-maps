@@ -2,7 +2,9 @@
 """Source-grid spot check for published CONUS tiles: for each field and checkpoint, the value decoded from the published
 L0 tile must equal the value read straight from the GRIB message (same cell, same conversion), and the coarse levels must
 be the documented corner cell or block maximum, rounded to the display step.
-Usage: python pipeline/spotcheck_conus.py SITE_DIR RUN_ID|auto FH [--model hrrr|nbm] [--json out.json]"""
+Usage: python pipeline/spotcheck_conus.py SITE_DIR RUN_ID|auto FH [--model hrrr|nbm|rrfs|ecmwf] [--json out.json]
+On a lat-lon model (ECMWF) the GRIB message is cropped to the published cells first, and its own grid keys must give the
+manifest's grid."""
 import argparse, json, os, sys
 import numpy as np
 
@@ -13,8 +15,8 @@ POINTS = conus.CHECKPOINTS + [("Minneapolis (MSP)", 44.8848, -93.2223), ("Buffal
 
 
 def cell(grid, lat, lon):
-    fwd = hrrr.lcc(grid); x, y = fwd(lat, lon)
-    return int(round((float(y) - grid["y0"]) / grid["DyInMetres"])), int(round((float(x) - grid["x0"]) / grid["DxInMetres"]))
+    fi, fj = conus.to_cell(grid, lat, lon)
+    return int(round(float(fj))), int(round(float(fi)))
 
 
 def tile_value(site, rel, man, field, fh, level, j, i):
@@ -33,7 +35,7 @@ def tile_value(site, rel, man, field, fh, level, j, i):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("site"); ap.add_argument("run"); ap.add_argument("fh", type=int); ap.add_argument("--json"); ap.add_argument("--model", default="hrrr", choices=("hrrr", "nbm", "rrfs"))
+    ap = argparse.ArgumentParser(); ap.add_argument("site"); ap.add_argument("run"); ap.add_argument("fh", type=int); ap.add_argument("--json"); ap.add_argument("--model", default="hrrr", choices=("hrrr", "nbm", "rrfs", "ecmwf"))
     a = ap.parse_args()
     if a.run == "auto":   # the newest run in the built site that has this hour
         idx = json.load(open(os.path.join(a.site, "data", "conus", *([a.model] if a.model != "hrrr" else []), "index.json")))
@@ -49,6 +51,8 @@ def main():
         import nbm; nbm.use_nbm(cyc)
     if a.model == "rrfs":
         import rrfs; rrfs.use_rrfs(cyc, man["hoursExpected"])
+    if a.model == "ecmwf":
+        import ecmwf; ecmwf.use_ecmwf(cyc, man["hoursExpected"])
     rows_of = conus.run_rows(cyc); TABLE = conus.FIELDS
     out, bad = [], 0
     for f, spec in TABLE.items():
@@ -56,6 +60,10 @@ def main():
         if rec is None: out.append({"field": f, "status": "missing hour"}); continue
         if "notApplicable" in rec: out.append({"field": f, "status": "not applicable", "why": rec["notApplicable"]}); continue
         k, v, src = spec["read"](rows_of(a.fh)[0], rows_of(a.fh)[1], a.fh, rows_of)
+        g = conus.grid_of(k)
+        if conus.is_ll(g):   # a crop of a global lat-lon message: the message's own keys must give the published grid
+            if g != grid: out.append({"field": f, "point": "grid", "match": False, "grib": None, "shown": None, "units": "", "L1": None, "L2": None}); bad += 1; continue
+            v = conus.crop(v, g)
         q = FX.encode(f, v, TABLE)
         if "points" in rec:   # every label value of the Values overlay equals the GRIB cell it names
             import gzip as _gz
