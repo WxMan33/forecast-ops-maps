@@ -188,10 +188,13 @@ def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
         for L in sorted(LEVELS, reverse=True):
             for name, t in tiles_for(q, L, spec["coarse"], spec["displayStep"]):
                 parts.append(encode_tile(t)); names.append(name)
-        blob = b"".join(parts); rel = f"{field}/f{fh:02d}.pack"
+        # the Values overlay's label points ride at the end of the same file (one object per field-hour, not two):
+        # pack["points"] = [offset, length]; the tiles' offsets are unchanged
+        pb = points_blob(q, grid or g); tiles_len = sum(len(b) for b in parts)
+        blob = b"".join(parts) + pb; rel = f"{field}/f{fh:02d}.pack"
         with open(os.path.join(out_dir, rel), "wb") as fp: fp.write(blob)
         # lengths in PACK_ORDER (levels coarsest first, each row by row); offsets are their running sum
-        pack = {"file": rel, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(), "lengths": [len(b) for b in parts]}
+        pack = {"file": rel, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(), "lengths": [len(b) for b in parts], "points": [tiles_len, len(pb)]}
         sizes = dict(zip(names, pack["lengths"]))
     else:
         d = os.path.join(out_dir, field, f"f{fh:02d}"); os.makedirs(d, exist_ok=True)
@@ -201,8 +204,9 @@ def process_hour(cycle, fh, field, out_dir, grid=None, rows_of=None):
                 with open(os.path.join(d, name), "wb") as fp: fp.write(b)
                 files[name] = [len(b), hashlib.sha256(b).hexdigest()[:16]]
         sizes = {n: v[0] for n, v in files.items()}
-    pb = points_blob(q, grid or g); os.makedirs(os.path.join(out_dir, field), exist_ok=True)
-    with open(os.path.join(out_dir, field, f"p{fh:02d}.bin.gz"), "wb") as fp: fp.write(pb)
+    if not PACK:
+        pb = points_blob(q, grid or g); os.makedirs(os.path.join(out_dir, field), exist_ok=True)
+        with open(os.path.join(out_dir, field, f"p{fh:02d}.bin.gz"), "wb") as fp: fp.write(pb)
     rec = {**({"pack": pack} if pack else {"files": files}), "points": [len(pb), hashlib.sha256(pb).hexdigest()[:16]], "bytes": {f"L{L}": sum(v for n, v in sizes.items() if n.startswith(f"L{L}_")) for L in LEVELS},
            "source": src, "seconds": {"download": round(t1 - t0, 2), "process": round(time.time() - t1, 2)},
            "missingCells": int((q == MISS).sum())}
@@ -268,8 +272,18 @@ def points_from_tiles(out_dir, field, fh, rec, grid, levels):
     return gzip.compress(np.array(vals, "<i2").tobytes(), 6, mtime=0)
 
 
+def points_bytes(out_dir, field, fh, rec):
+    """The gzip'd label points of one field-hour: inside the pack file (pack["points"] = [offset, length]) or the
+    separate p{fh}.bin.gz written before points moved into packs (and in the unpacked layout)."""
+    pk = rec.get("pack") or {}
+    if pk.get("points"):
+        off, n = pk["points"]
+        with open(os.path.join(out_dir, pk["file"]), "rb") as fp: fp.seek(off); return fp.read(n)
+    with open(os.path.join(out_dir, field, f"p{fh:02d}.bin.gz"), "rb") as fp: return fp.read()
+
+
 def carry_hour(site_url, rel, field, fh, rec, out_dir):
-    if "points" in rec:
+    if "points" in rec and not (rec.get("pack") or {}).get("points"):
         n, sha = rec["points"]; name = f"{field}/p{fh:02d}.bin.gz"
         b = fetch_carry(site_url, rel, name, n, lambda x: hashlib.sha256(x).hexdigest()[:16] == sha)
         os.makedirs(os.path.join(out_dir, field), exist_ok=True)

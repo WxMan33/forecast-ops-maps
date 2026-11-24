@@ -162,6 +162,17 @@ with tempfile.TemporaryDirectory() as _site:
     _put("data/conus/nbm/index.json", _j.dumps({"runs": [{"path": "data/conus/nbm/NEW/conus-v1-packed"}]}).encode()); _put("data/conus/nbm/NEW/conus-v1-packed/t2m/f01.pack")
     _u, _d, _k = r2_sync.plan(_site, _existing)
     ok(sorted(_d) == sorted(_existing) and any(u[0] == "data/conus/nbm/index.json" for u in _u), f"R2 sync with an NBM build: prunes the old run of each model and uploads the NBM index ({len(_d)} deleted)")
+    # an unchanged manifest or index is not uploaded again (its MD5 equals the bucket ETag); a changed one is
+    _ix = open(os.path.join(_site, "data/conus/nbm/index.json"), "rb").read(); import hashlib as _hl
+    _u, _d, _k = r2_sync.plan(_site, {**_existing, "data/conus/nbm/index.json": (len(_ix), _hl.md5(_ix).hexdigest())})
+    ok("data/conus/nbm/index.json" in _k and not any(u[0] == "data/conus/nbm/index.json" for u in _u), "R2 sync: an unchanged .json (same MD5 as the bucket ETag) is kept, not uploaded")
+    _u, _d, _k = r2_sync.plan(_site, {**_existing, "data/conus/nbm/index.json": (len(_ix), "0" * 32)})
+    ok(any(u[0] == "data/conus/nbm/index.json" for u in _u), "R2 sync: a changed .json is uploaded")
+    # label points inside the pack: read back from [offset, length], or from the separate file of older hours
+    _put("data/conus/hrrr/B/conus-v1-packed/t2m/f02.pack", b"TILES" + b"PTS")
+    ok(conus.points_bytes(os.path.join(_site, "data/conus/hrrr/B/conus-v1-packed"), "t2m", 2, {"pack": {"file": "t2m/f02.pack", "points": [5, 3]}}) == b"PTS", "label points are read from inside the pack")
+    _put("data/conus/hrrr/B/conus-v1-packed/t2m/p03.bin.gz", b"OLD")
+    ok(conus.points_bytes(os.path.join(_site, "data/conus/hrrr/B/conus-v1-packed"), "t2m", 3, {"pack": {"file": "t2m/f03.pack"}, "points": [3, "x"]}) == b"OLD", "older hours read their separate label points file")
 # 11. RRFS: its own reflectivity encoding and F00 type, its own labels and credit, run retention, and R2 pruning
 import rrfs  # noqa: E402
 ok(set(rrfs.FIELDS) == {"t2m", "d2m", "gust", "refc", "ptype", "apcp1h", "apcp_run", "asnow1h", "asnow_run"} and "frzr_run" not in rrfs.FIELDS,
