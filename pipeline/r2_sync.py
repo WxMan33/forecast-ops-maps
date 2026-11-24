@@ -7,14 +7,17 @@ that are no longer retained. Credentials come from the environment (GitHub Actio
   R2_BUCKET                                e.g. forecast-ops-conus-pilot
 
 Packed hour files are immutable (cached for a year); manifests and the index are re-read on every visit (no-cache).
-An object already in the bucket with the same size is not uploaded again. Prints what it did: objects and bytes
+An object already in the bucket with the same size is not uploaded again; a manifest or index (.json) is re-uploaded
+only when its contents changed (its MD5 differs from the bucket ETag). Prints what it did: objects and bytes
 uploaded, deleted, and kept, so the pilot can report storage and request counts. --dry-run lists the plan only.
 """
-import argparse, json, mimetypes, os, sys
+import argparse, hashlib, json, mimetypes, os, sys
 
 
 def plan(site, existing):
-    """existing: {key: size}. Returns (uploads [(key, path, size, cache)], deletes [key], kept [key])."""
+    """existing: {key: size} or {key: (size, etag)}. Returns (uploads [(key, path, size, cache)], deletes [key], kept [key]).
+    Immutable files are kept when the bucket has the same size; .json files when the bucket's ETag (the MD5 of a single
+    PUT) equals the local file's MD5, so an unchanged manifest costs no Class A operation."""
     root = os.path.join(site, "data", "conus"); files = {}
     for d, _, names in os.walk(root):
         for n in names:
@@ -30,7 +33,11 @@ def plan(site, existing):
     uploads, kept = [], []
     for key, p in sorted(files.items()):
         size, mutable = os.path.getsize(p), key.endswith(".json")
-        if not mutable and existing.get(key) == size: kept.append(key); continue
+        have = existing.get(key); have_size, etag = (have if isinstance(have, tuple) else (have, None))
+        if not mutable and have_size == size: kept.append(key); continue
+        if mutable and etag and have_size == size:
+            with open(p, "rb") as fp:
+                if hashlib.md5(fp.read()).hexdigest() == etag: kept.append(key); continue
         uploads.append((key, p, size, "no-cache" if mutable else "public, max-age=31536000, immutable"))
     deletes = sorted(k for k in existing if any(k.startswith(m) for m in prunable) and k not in files and not any(k.startswith(r) for r in retained))
     return uploads, deletes, kept
@@ -49,7 +56,7 @@ def main():
     existing, lists = {}, 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=env["R2_BUCKET"], Prefix="data/conus/"):
         lists += 1
-        for o in page.get("Contents", []): existing[o["Key"]] = o["Size"]
+        for o in page.get("Contents", []): existing[o["Key"]] = (o["Size"], (o.get("ETag") or "").strip('"'))
     uploads, deletes, kept = plan(a.site, existing)
     # immutable data first, the index last, so a visitor never sees an index pointing at files not yet there
     uploads.sort(key=lambda u: (u[0].endswith("index.json"), u[0].endswith("manifest.json")))
@@ -58,7 +65,7 @@ def main():
             s3.put_object(Bucket=env["R2_BUCKET"], Key=key, Body=f, ContentType=mimetypes.guess_type(key)[0] or "application/octet-stream", CacheControl=cache)
     for i in range(0, len(deletes), 1000):
         s3.delete_objects(Bucket=env["R2_BUCKET"], Delete={"Objects": [{"Key": k} for k in deletes[i:i + 1000]]})
-    after = {k: v for k, v in existing.items() if k not in deletes}; after.update({u[0]: u[2] for u in uploads}); stored = sum(after.values())
+    after = {k: v[0] for k, v in existing.items() if k not in deletes}; after.update({u[0]: u[2] for u in uploads}); stored = sum(after.values())
     print(json.dumps({"uploaded": len(uploads), "uploadedBytes": sum(u[2] for u in uploads), "deleted": len(deletes), "kept": len(kept),
                       "classA": {"put": len(uploads), "list": lists, "deleteBatches": (len(deletes) + 999) // 1000}, "storedBytesAfter": stored}))
 

@@ -60,7 +60,7 @@ def main():
         if "points" in rec:   # every label value of the Values overlay equals the GRIB cell it names
             import gzip as _gz
             ij, _d = conus.label_points(grid)
-            got = np.frombuffer(_gz.decompress(open(os.path.join(a.site, rel, f, f"p{a.fh:02d}.bin.gz"), "rb").read()), "<i2")
+            got = np.frombuffer(_gz.decompress(conus.points_bytes(os.path.join(a.site, rel), f, a.fh, rec)), "<i2")
             want = np.array([q[j, i] for i, j in ij], np.int16); nbad = int((got != want).sum()) if got.size == want.size else -1
             out.append({"field": f, "point": f"label points ({got.size}: {len(_d['places'])} places + {_d['lattice']['nx']}x{_d['lattice']['ny']} grid)", "match": nbad == 0, "grib": None, "shown": None, "units": "", "L1": None, "L2": None, "labelPointsWrong": nbad}); bad += nbad != 0
         pts = [(name, *cell(grid, lat, lon)) for name, lat, lon in POINTS]
