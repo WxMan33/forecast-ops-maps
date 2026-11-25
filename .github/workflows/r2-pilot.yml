@@ -55,7 +55,11 @@ jobs:
         # Source: ECMWF open data on its AWS mirror (s3://ecmwf-forecasts), © ECMWF, CC BY 4.0. A failed ECMWF build uploads no
         # ECMWF index, so the sync keeps the ECMWF data already in the bucket. The Kuchera snowfall (asnowk_run) is recomputed
         # independently from every 3-h step's GRIB up to the checked step: at F06 with the other fields, and alone at F24
-        # (8 steps, about 21 MB) rather than at F96 (32 steps, about 83 MB, on every run of this workflow)
+        # (8 steps, about 21 MB) rather than at F96 (32 steps, about 83 MB, on every run of this workflow).
+        # Its own time limit: a slow ECMWF build (mirror throttling while a run is posting) must not run the whole job past
+        # its 45 min and cancel the HRRR/NBM/RRFS upload with it (14 cancelled runs on 24-25 Nov 2026)
+        id: ecmwf
+        timeout-minutes: 20
         continue-on-error: true
         run: |
           python pipeline/ecmwf.py --pack --site _r2 --prev _r2_prev --published "${R2_PUBLIC_URL%/}" \
@@ -64,6 +68,11 @@ jobs:
             && python pipeline/spotcheck_conus.py _r2 auto 96 --model ecmwf --skip asnowk_run \
             && python pipeline/spotcheck_conus.py _r2 auto 24 --model ecmwf --only asnowk_run \
             || { rm -rf _r2/data/conus/ecmwf; echo "::warning::ECMWF not built this run; R2 keeps its existing ECMWF data"; }
+      - name: Drop a half-built ECMWF tree (the ECMWF step stopped at its time limit before it could clean up)
+        if: ${{ always() && steps.ecmwf.outcome != 'success' }}
+        run: |
+          rm -rf _r2/data/conus/ecmwf
+          echo "::warning::ECMWF build did not finish in time; R2 keeps its existing ECMWF data"
       - name: Upload changes to R2 and remove expired runs
         shell: bash   # -o pipefail: a missing setting or failed upload fails the run (tee alone would hide it)
         env:
